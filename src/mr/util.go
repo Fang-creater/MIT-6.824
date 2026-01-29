@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 )
 
 var tmp string
@@ -39,6 +40,10 @@ func runMRchan(files []string, app string, n int, c chan int, sock string) {
 	if err := coord.Start(); err != nil {
 		log.Fatalf("mr failed %v", err)
 	}
+
+	// give the coordinator time to create the sockets.
+	time.Sleep(1 * time.Second)
+
 	for i := 0; i < n; i++ {
 		startWorker(app, i, c, sock)
 	}
@@ -67,7 +72,7 @@ func RandString(n int) string {
 // in /var/tmp, for the coordinator.
 func coordinatorSock() string {
 	const N = 20
-	s := "/var/tmp/5840-mr-"
+	s := "/tmp/5840-mr-"
 	s += RandString(20)
 	return s
 }
