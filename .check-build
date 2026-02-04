@@ -3,23 +3,74 @@
 set -eu
 
 REFERENCE_FILES=(
-    # misc
+    src/Makefile
+
+    # tester1
+    src/tester1/config.go
+    src/tester1/sockrpc/rpcclnt.go
+    src/tester1/sockrpc/rpcsrv.go
+    src/tester1/annotation.go
+    src/tester1/srv.go
+    src/tester1/persister.go
+    src/tester1/daemonsrv.go
+    src/tester1/group.go
+    src/tester1/testclnt.go
+    src/tester1/daemonclnt.go
+    src/tester1/testsrv.go
+    src/tester1/clnts.go
+    src/tester1/demux/dmxsrv.go
+    src/tester1/demux/dmxclnt.go
+    src/tester1/demux/callmap.go
+    src/tester1/demux/transport.go
+
+    # labgob
     src/labgob/labgob.go
     src/labgob/test_test.go
+
+    # labrpc
     src/labrpc/labrpc.go
     src/labrpc/test_test.go
+
     src/models1/kv.go
 
-    # lab 1
-    src/mrapps/crash.go
-    src/mrapps/indexer.go
-    src/mrapps/mtiming.go
-    src/mrapps/nocrash.go
-    src/mrapps/rtiming.go
-    src/mrapps/wc.go
+    # src/kvtest1
+    src/kvtest1/kvtest.go
+    src/kvtest1/porcupine.go
+
+    # mains
+    src/main/shardgrp1d.go
     src/main/mrsequential.go
-    src/main/mrcoordinator.go
+    src/main/kvraft1d.go
+    src/main/pg-metamorphosis.txt
+    src/main/pg-being_ernest.txt
+    src/main/rsm1d.go
+    src/main/pg-frankenstein.txt
+    src/main/diskvd.go
+    src/main/pg-tom_sawyer.txt
+    src/main/kvsrv1d.go
+    src/main/lockc.go
     src/main/mrworker.go
+    src/main/pg-grimm.txt
+    src/main/pbc.go
+    src/main/pg-sherlock_holmes.txt
+    src/main/pg-dorian_gray.txt
+    src/main/pbd.go
+    src/main/viewd.go
+    src/main/mrcoordinator.go
+    src/main/lockd.go
+    src/main/pg-huckleberry_finn.txt
+    src/main/raft1d.go
+
+    # lab 1
+    src/mrapps/indexer.go
+    src/mrapps/crash.go
+    src/mrapps/rtiming.go
+    src/mrapps/nocrash.go
+    src/mrapps/mtiming.go
+    src/mrapps/jobcount.go
+    src/mrapps/wc.go
+    src/mrapps/early_exit.go
+    src/mr/util.go
 
     # lab 2
     src/kvsrv1/lock/lock_test.go

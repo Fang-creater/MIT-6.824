@@ -30,7 +30,10 @@ shardkv: .FORCE
 	go build $(RACE) -o main/shardgrp1d main/shardgrp1d.go
 	cd shardkv1; go test -timeout 15m $(VERB) $(RACE) $(RUN) $(RAFT)
 
-mr: .FORCE check-version
+mr: .FORCE check-version mr-build
+	cd mr; go test $(VERB) $(RACE) $(RUN)
+
+mr-build: .FORCE check-version
 	go build $(RACE) -o main/mrsequential main/mrsequential.go
 	go build $(RACE) -o main/mrcoordinator main/mrcoordinator.go
 	go build $(RACE) -o main/mrworker main/mrworker.go&
@@ -42,7 +45,6 @@ mr: .FORCE check-version
 	(cd mrapps && go build $(RACE) -buildmode=plugin early_exit.go) || exit 1
 	(cd mrapps && go build $(RACE) -buildmode=plugin crash.go) || exit 1
 	(cd mrapps && go build $(RACE) -buildmode=plugin nocrash.go) || exit 1
-	cd mr; go test $(VERB) $(RACE) $(RUN)
 
 .PHONY: .FORCE
 
