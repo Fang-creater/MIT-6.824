@@ -52,6 +52,10 @@ type CheckerBegin struct {
 // running multiple test cases, some zombie threads in previous test cases could
 // interfere the current one. An ad-hoc fix at the user level would be adding
 // annotations only if the killed flag on the server is not set.
+//
+// TODO: Now that we've switched to the new "running tester and each raft server
+// in a separate process" model, we should make it local (since we already have
+// a global in annotator.go).
 var annotation *Annotation = mkAnnotation()
 var unit struct{} = captureSignal()
 var finfo *FrameworkInfo
@@ -82,7 +86,9 @@ func FinalizeAnnotations(end string) []porcupine.Annotation {
 		Details: end,
 		BackgroundColor: COLOR_INFO,
 	}
+	annotation.mu.Lock()
 	annotations = append(annotations, aend)
+	annotation.mu.Unlock()
 
 	return annotations
 }
@@ -113,7 +119,7 @@ func AnnotateContinuousEnd(tag string) {
 
 // Used by users.
 
-func Annotate(tag, desp, details string) {
+func AnnotatePoint(tag, desp, details string) {
 	annotation.annotatePointColor(tag, desp, details, COLOR_USER)
 }
 
@@ -376,7 +382,8 @@ func (an *Annotation) finalize() []porcupine.Annotation {
 	an.mu.Lock()
 	defer an.mu.Unlock()
 
-	x := an.annotations
+	x := make([]porcupine.Annotation, len(an.annotations))
+	copy(x, an.annotations)
 
 	t := timestamp()
 	for tag, cont := range(an.continuous) {

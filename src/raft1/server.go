@@ -160,14 +160,15 @@ func (rs *rfsrv) applierSnap(applyCh chan raftapi.ApplyMsg) {
 					xlog = append(xlog, rs.log[j])
 				}
 				e.Encode(xlog)
-				// XXX get Annotate to tester
-				start := tester.GetAnnotateTimestamp()
+				start := tester.GetAnnotatorTimestamp()
 				rf := rs.getraft()
 				rf.Snapshot(m.CommandIndex, w.Bytes())
+				desp := fmt.Sprintf("snapshot created by %v", rs.me)
 				details := fmt.Sprintf(
-					"snapshot created after applying the command at index %v",
+					"snapshot created by server %v after applying the command at index %v",
+					rs.me,
 					m.CommandIndex)
-				tester.AnnotateInfoInterval(start, "snapshot created", details)
+				tester.PostAnnotatorInfoInterval(start, desp, details)
 			}
 		} else {
 			// Ignore other types of ApplyMsg.

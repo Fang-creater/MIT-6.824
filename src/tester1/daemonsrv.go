@@ -95,6 +95,8 @@ func InitDaemon(args []string, mks FstartServer) error {
 
 	// for RPCs to tester (e.g., Forward)
 	ds.rpcc = sockrpc.NewRPCClnt(endNames[sid], testerEndName)
+	// set the global for user-level annotation (`rpcc` is defined in `annotator.go`)
+	rpcc = ds.rpcc
 	// for ctl RPCS to this daemon (e.g., Start)
 	ds.rpcsCtl = sockrpc.NewRPCSrv(sockctl(ds.endName))
 	ds.rpcsCtl.AddService(ds)
