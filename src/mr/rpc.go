@@ -33,6 +33,7 @@ type Task struct {
 	NReduce int
 	NMap    int
 	File    string
+	Version int
 }
 
 type RequestTaskArgs struct {
@@ -40,5 +41,15 @@ type RequestTaskArgs struct {
 }
 
 type RequestTaskReply struct {
-	Task Task
+	Task    Task
+	Version int
+}
+
+type ReportDoneArgs struct {
+	TaskType TaskType
+	TaskId   int
+	Version  int
+}
+
+type ReportDoneReply struct {
 }
