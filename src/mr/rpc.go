@@ -33,7 +33,6 @@ type Task struct {
 	NReduce int
 	NMap    int
 	File    string
-	Version int
 }
 
 type RequestTaskArgs struct {
