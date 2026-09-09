@@ -8,12 +8,14 @@ package raft
 // raft interface.
 
 import (
+	"bytes"
 	//	"bytes"
 	"math/rand"
 	"sort"
 	"sync"
 	"time"
 
+	"6.5840/labgob"
 	//	"6.5840/labgob"
 	"6.5840/labrpc"
 	"6.5840/raftapi"
@@ -36,6 +38,7 @@ type Raft struct {
 	currentTerm int
 	votedFor    int        //-1 means haven't vote
 	log         []LogEntry //0 is dummy entry{Term:0} real log begins at 1
+	snapshot    []byte
 
 	//volatile state
 	state             int //0:follower 1：candidate 2:leader
@@ -99,6 +102,13 @@ func (rf *Raft) persist() {
 	// e.Encode(rf.yyy)
 	// raftstate := w.Bytes()
 	// rf.persister.Save(raftstate, nil)
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.log)
+	raftstate := w.Bytes()
+	rf.persister.Save(raftstate, rf.snapshot)
 }
 
 // restore previously persisted state.
@@ -119,6 +129,20 @@ func (rf *Raft) readPersist(data []byte) {
 	//   rf.xxx = xxx
 	//   rf.yyy = yyy
 	// }
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var currentTerm int
+	var votedFor int
+	var log []LogEntry
+	if d.Decode(&currentTerm) != nil ||
+		d.Decode(&votedFor) != nil ||
+		d.Decode(&log) != nil {
+		panic("readPersist: decode error")
+	} else {
+		rf.currentTerm = currentTerm
+		rf.votedFor = votedFor
+		rf.log = log
+	}
 }
 
 // how many bytes in Raft's persisted log?
@@ -696,6 +720,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	}
 
 	// initialize from state persisted before a crash
+	rf.snapshot = rf.persister.ReadSnapshot()
 	rf.readPersist(persister.ReadRaftState())
 
 	go rf.applier()
