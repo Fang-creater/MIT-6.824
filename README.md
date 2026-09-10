@@ -46,6 +46,10 @@ Map / Reduce user functions are assumed idempotent, safe for repeated re‑execu
 
 The main challenge was correctness under network delay and process failure; simple retry logic leads to silent data corruption. Task versioning offers a low‑overhead solution for suppressing stale worker responses. Data‑intensive distributed workload performance is often bounded by filesystem I/O rather than CPU computation.
 
+### Test Results
+
+![Lab1 MapReduce all tests passed](assets/lab1-mapreduce-test.png)
+
 ### Reproduce Test Results
 
 ```
@@ -182,6 +186,14 @@ make RUN="-run 3C" raft1
 # Stress‑test full suite with race detector, repeated for grading‑style validation
 for i in {1..100}; do go test -race 2>&1 | tee -a lab3.log; done
 ```
+
+### Raw output
+
+![Lab3 3A Leader Election Test Output](assets/lab3-3a-election.png)
+
+![Lab3 3B Log Replication Test Output](assets/lab3-3b-replication.png)
+
+![Lab3 3C Persistence Test Output](assets/lab3-3c-persist.png)
 
 All 3A / 3B / 3C test cases pass under Go race detector.
 
