@@ -385,7 +385,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		if pos >= len(rf.log) {
 			rf.log = append(rf.log, e)
 		} else if rf.log[pos].Term != e.Term {
-			rf.log = append(rf.log[:pos], e)
+			rf.log = append(rf.log[:pos], args.Entries[i:]...)
+			break
 		}
 	}
 	if len(args.Entries) > 0 {
@@ -422,72 +423,87 @@ func (rf *Raft) signalAll() {
 }
 
 func (rf *Raft) replicator(peer int) {
+	ticker := time.NewTicker(HeartbeatInterval)
+	defer ticker.Stop()
 	for {
 		select {
 		case <-rf.triggers[peer]:
-		case <-time.After(HeartbeatInterval):
+		case <-ticker.C:
 		}
-		rf.mu.Lock()
-		if rf.state != Leader {
-			rf.mu.Unlock()
-			continue
-		}
-		term := rf.currentTerm
-		prevIndex := rf.nextIndex[peer] - 1
-		if prevIndex < 0 {
-			prevIndex = 0
-		}
-		if prevIndex >= len(rf.log) {
-			rf.mu.Unlock()
-			continue
-		}
-		//entries := make([]LogEntry, len(rf.log)-prevIndex-1)
-		//copy(entries, rf.log[prevIndex+1:])
-		var entries []LogEntry
-		if prevIndex+1 < len(rf.log) {
-			entries = make([]LogEntry, len(rf.log)-prevIndex-1)
-			copy(entries, rf.log[prevIndex+1:])
-		}
-		args := &AppendEntriesArgs{
-			Term:         term,
-			LeaderId:     rf.me,
-			PrevLogIndex: prevIndex,
-			PrevLogTerm:  rf.log[prevIndex].Term,
-			Entries:      entries,
-			LeaderCommit: rf.commitIndex,
-		}
+		// Do not wait for an earlier RPC reply here.  In the Figure 8
+		// long-reordering test a reply may be delayed for seconds; serializing
+		// RPCs per follower makes log backtracking take longer than the test's
+		// final agreement window.  replicateOnce validates term/state again
+		// before applying its reply, so delayed replies are harmless.
+		go rf.replicateOnce(peer)
+	}
+}
+
+func (rf *Raft) replicateOnce(peer int) {
+	rf.mu.Lock()
+	if rf.state != Leader {
 		rf.mu.Unlock()
-		reply := &AppendEntriesReply{}
-		ok := rf.sendAppendEntries(peer, args, reply)
-		rf.mu.Lock()
-		if !ok || rf.state != Leader || rf.currentTerm != term {
-			rf.mu.Unlock()
-			continue
+		return
+	}
+	term := rf.currentTerm
+	prevIndex := rf.nextIndex[peer] - 1
+	if prevIndex < 0 {
+		prevIndex = 0
+	}
+	if prevIndex >= len(rf.log) {
+		rf.mu.Unlock()
+		return
+	}
+	//entries := make([]LogEntry, len(rf.log)-prevIndex-1)
+	//copy(entries, rf.log[prevIndex+1:])
+	var entries []LogEntry
+	if prevIndex+1 < len(rf.log) {
+		entries = make([]LogEntry, len(rf.log)-prevIndex-1)
+		copy(entries, rf.log[prevIndex+1:])
+	}
+	args := &AppendEntriesArgs{
+		Term:         term,
+		LeaderId:     rf.me,
+		PrevLogIndex: prevIndex,
+		PrevLogTerm:  rf.log[prevIndex].Term,
+		Entries:      entries,
+		LeaderCommit: rf.commitIndex,
+	}
+	rf.mu.Unlock()
+	reply := &AppendEntriesReply{}
+	ok := rf.sendAppendEntries(peer, args, reply)
+	rf.mu.Lock()
+	if !ok || rf.state != Leader || rf.currentTerm != term {
+		rf.mu.Unlock()
+		return
+	}
+	if reply.Term > rf.currentTerm {
+		rf.toFollower(reply.Term)
+		rf.mu.Unlock()
+		return
+	}
+	if reply.Success {
+		newMatch := prevIndex + len(entries)
+		newNext := newMatch + 1
+		if newMatch > rf.matchIndex[peer] {
+			rf.matchIndex[peer] = newMatch
 		}
-		if reply.Term > rf.currentTerm {
-			rf.toFollower(reply.Term)
-			rf.mu.Unlock()
-			continue
+		if newNext > rf.nextIndex[peer] {
+			rf.nextIndex[peer] = newNext
 		}
-		if reply.Success {
-			newMatch := prevIndex + len(entries)
-			newNext := newMatch + 1
-			if newMatch > rf.matchIndex[peer] {
-				rf.matchIndex[peer] = newMatch
-			}
-			if newNext > rf.nextIndex[peer] {
-				rf.nextIndex[peer] = newNext
-			}
-			rf.advanceCommitIndex()
-		} else {
+		rf.advanceCommitIndex()
+	} else {
+		// Ignore a rejection for an RPC whose nextIndex has already
+		// been superseded by a successful, newer RPC.
+		if rf.nextIndex[peer] <= args.PrevLogIndex+1 {
 			rf.backupNextIndex(peer, reply)
 			select {
 			case rf.triggers[peer] <- struct{}{}:
 			default:
 			}
 		}
-		rf.mu.Unlock()
 	}
+	rf.mu.Unlock()
 }
 
 func (rf *Raft) backupNextIndex(peer int, reply *AppendEntriesReply) {
