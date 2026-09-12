@@ -229,7 +229,7 @@ for i in {1..100}; do go test -race 2>&1 | tee -a lab3.log; done
 All 3A / 3B / 3C / 3D test cases pass under Go race detector.
 
 ### Test Results
-![Lab3 Raft all tests passed](assets/lab1-full.png)
+![Lab3 Raft all tests passed](assets/lab3-full.png)
 
 | Test | Validation Scenario | Status |
 | --- | --- | --- |
