@@ -1,20 +1,41 @@
 # MIT 6.5840 (Formerly 6.824) Distributed Systems Labs
 
 > 
-> Go‑language implementations for MIT graduate‑level distributed systems course 6.5840, covering MapReduce, Raft consensus and fault‑tolerant replicated key‑value serviceGitHub. This repository demonstrates hands‑on engineering of fault‑tolerant, concurrent distributed protocols, with rigorous unit testing under race‑detection and network‑failure injection.
+> Go‑language implementations for MIT graduate‑level distributed systems course 6.5840, covering MapReduce, single-node KV server, Raft consensus, fault‑tolerant replicated key‑value service and sharded key-value store. This repository demonstrates hands‑on engineering of fault‑tolerant, concurrent distributed protocols, with rigorous unit testing under race‑detection and network‑failure injection.
+
+## Table of Contents
+
+- [Overview](#overview)
+- [Lab Completion Summary](#lab-completion-summary)
+- [Lab 1: MapReduce](#lab-1-mapreduce)
+- [Lab 2: Single-node Linearizable Key/Value Server](#lab-2-single-node-linearizable-keyvalue-server)
+- [Lab 3: Raft Consensus & Fault-Tolerant Replicated KV Service](#lab-3-raft-consensus--fault-tolerant-replicated-kv-service)
+- [Lab 4: Fault-tolerant Key/Value Service](#lab-4-fault-tolerant-keyvalue-service)
+- [Lab 5: Sharded Key/Value Service](#lab-5-sharded-keyvalue-service)
+- [Tech Stack](#tech-stack)
+- [Acknowledgements](#acknowledgements)
+
+## Overview
+
+This repo contains my full implementations for MIT 6.5840 (old 6.824) distributed systems labs.
+The labs progressively build distributed primitives: from a simple distributed MapReduce framework, single-node KV server, Raft consensus protocol, replicated KV service, and finally a sharded, reconfigurable key-value store.
+All completed labs pass the official test suite with Go race detector enabled.
+
+## Lab Completion Summary
 
 | Lab | Topic | Completion Status |
 | --- | --- | --- |
 | **Lab 1** | Map‑Reduce Distributed Data‑Processing Framework | Completed — all official tests passed |
 | **Lab 2** | Single‑node Linearizable Key‑Value Server | Not started |
-| **Lab 3** | Raft Consensus & Fault‑Tolerant Replicated KV Service | 3A / 3B / 3C fully passing; 3D log‑compaction snapshot work‑in‑progress |
-| **Lab 4** | Sharded Fault‑Tolerant Key‑Value Store | Not started |
+| **Lab 3** | Raft Consensus & Fault‑Tolerant Replicated KV Service | Fully complete: 3A / 3B / 3C / 3D all tests passing |
+| **Lab 4** | Fault-tolerant Key/Value Service | Not started |
+| **Lab 5** | Sharded Key/Value Service | Not started |
 
 ---
 
 ## Lab 1: MapReduce
 
-A fault‑tolerant distributed MapReduce implementation following the original Google MapReduce paper. The system supports parallel task scheduling, worker crash recovery, atomic intermediate‑file handling, and correct execution semantics under delayed or duplicate worker repliesMIT CSAIL ....
+A fault‑tolerant distributed MapReduce implementation following the original Google MapReduce paper. The system supports parallel task scheduling, worker crash recovery, atomic intermediate‑file handling, and correct execution semantics under delayed or duplicate worker replies.
 
 ### System Overview
 
@@ -47,7 +68,6 @@ Map / Reduce user functions are assumed idempotent, safe for repeated re‑execu
 The main challenge was correctness under network delay and process failure; simple retry logic leads to silent data corruption. Task versioning offers a low‑overhead solution for suppressing stale worker responses. Data‑intensive distributed workload performance is often bounded by filesystem I/O rather than CPU computation.
 
 ### Test Results
-
 ![Lab1 MapReduce all tests passed](assets/lab1-mapreduce-test.png)
 
 ### Reproduce Test Results
@@ -69,12 +89,21 @@ make mr
 
 ---
 
-## Lab 3: Raft Consensus & Fault‑Tolerant Key‑Value Service
-
-From‑scratch Go implementation of the **Raft replicated state‑machine consensus protocol** following the extended Raft paper, layered underneath a linearizable replicated key‑value serviceMIT CSAIL ....
+## Lab 2: Single‑node Linearizable Key‑Value Server
 
 > 
-> Status: 3A (leader election), 3B (log replication), 3C (crash persistence) complete and stable. 3D (snapshot / log compaction) is work‑in‑progress (`Snapshot()` stub implemented, full InstallSnapshot RPC pipeline pending).
+> Status: Not started
+
+A simple linearizable key/value server without consensus. Implements `Put`, `Append`, `Get` operations with client request deduplication to avoid duplicated writes when clients retry requests. This lab builds RPC and state-machine foundations that will be reused in Lab3 replicated KV service.
+
+---
+
+## Lab 3: Raft Consensus & Fault‑Tolerant Replicated KV Service
+
+From‑scratch Go implementation of the **Raft replicated state‑machine consensus protocol** following the extended Raft paper, layered underneath a linearizable replicated key‑value service.
+
+> 
+> Status: 3A (leader election), 3B (log replication), 3C (crash persistence), **3D (snapshot / log compaction)** fully completed and all official tests passing.
 
 ### Architecture Layering
 
@@ -156,7 +185,17 @@ rf.mu.Lock()
 
 Call `persist()` exactly whenever durable consensus state mutates: term increment, vote granted, new log entries appended, client command submitted in `Start()`. `Make()` restores persisted state with `readPersist()` **before launching any background goroutines**, so goroutines never observe partially‑initialized Raft peer state.
 
-#### 6. Application‑Layer Replicated KV Service
+#### 6. 3D Snapshot & Log Compaction
+
+Log compaction solves infinite log growth problem by persisting a snapshot of the state machine and discarding old log entries before the snapshot’s `lastIncludedIndex`.
+
+1. Index translation layer: all log access translates global log index to offset inside the in-memory log slice, skipping entries pruned by snapshot.
+2. `Snapshot(index, snapshot []byte)` API: truncate log up through `index`, persist `lastIncludedIndex` / `lastIncludedTerm` together with binary snapshot blob.
+3. `InstallSnapshot` RPC: transfers snapshot to lagging peers whose required log prefix has been compacted away.
+4. `applier()` handles snapshot messages from `applyCh`. The KV state machine loads snapshot data and replaces local state.
+5. On restart: peer loads persisted snapshot first and replays remaining log entries after snapshot point.
+
+#### 7. Application‑Layer Replicated KV Service
 
 1. Client operations are wrapped into log commands and submitted through `Raft.Start()`. Non‑leader nodes reject client requests immediately.
 2. Application thread blocks waiting for target log index on `applyCh`. If term has advanced or log slot got overwritten by new leader, client operation is retried.
@@ -170,32 +209,27 @@ Call `persist()` exactly whenever durable consensus state mutates: term incremen
 - Figure 8 commit safety rule is not theoretical: it triggers reliably under test‑suite failure injection, silently dropping committed entries if omitted.
 - Heartbeat frequency and replication latency create real design tension; trigger‑channel pattern decouples urgent replication events from idle heartbeat cadence.
 - Persist must be invoked on every durable‑state mutation; infrequent persistence leads to non‑deterministic flaky test failures appearing many terms after original bug.
+- Snapshot index translation is error-prone: off-by-one bugs easily appear when mixing global log index and slice offset after log truncation.
 
 ### Test Execution Commands
 
 ```
 # Run leader‑election tests (3A)
 make RUN="-run 3A" raft1
-
 # Run log‑replication tests (3B)
 make RUN="-run 3B" raft1
-
 # Run crash‑persistence tests (3C)
 make RUN="-run 3C" raft1
-
+# Run snapshot & log compaction tests (3D)
+make RUN="-run 3D" raft1
 # Stress‑test full suite with race detector, repeated for grading‑style validation
 for i in {1..100}; do go test -race 2>&1 | tee -a lab3.log; done
 ```
 
-### Raw output
+All 3A / 3B / 3C / 3D test cases pass under Go race detector.
 
-![Lab3 3A Leader Election Test Output](assets/lab3-3a-election.png)
-
-![Lab3 3B Log Replication Test Output](assets/lab3-3b-replication.png)
-
-![Lab3 3C Persistence Test Output](assets/lab3-3c-persist.png)
-
-All 3A / 3B / 3C test cases pass under Go race detector.
+### Test Results
+![Lab3 Raft all tests passed](assets/lab1-full.png)
 
 | Test | Validation Scenario | Status |
 | --- | --- | --- |
@@ -210,21 +244,38 @@ All 3A / 3B / 3C test cases pass under Go race detector.
 | `TestFigure83C` | Safety: already‑committed entries are never lost | ✅ PASS |
 | `TestUnreliableAgree3C` | Maintain consensus over lossy, reordered network | ✅ PASS |
 | `TestFigure8Unreliable3C` | Figure‑8 safety under unreliable network | ✅ PASS |
-| `TestSnapshot3D` | Log compaction & snapshot install | ⬜ In‑Progress |
-
-### Planned Work for Lab 3D Log Compaction & Snapshots
-
-1. Index translation helper abstraction: after log trimming, convert global log index to slice offset `i‑lastIncludedIndex`. Refactor all direct array indexing of `rf.log`; handle out‑of‑range indices gracefully.
-2. Implement `Snapshot(index, snapshot)` API: truncate log up through `index`, persist `lastIncludedIndex` / `lastIncludedTerm` alongside existing durable fields and store binary snapshot blob.
-3. Implement `InstallSnapshot` RPC for catching‑up lagging peers whose required log prefix has been pruned.
-4. Modify `applier()`: emit snapshot‑install notification via `applyCh` instead of individual log entries when snapshot is received. KV application must load snapshot into its local state‑machine.
-5. Startup recovery: deliver persisted snapshot onto `applyCh` before normal log replay proceeds after peer restart.
+| `TestSnapshot3D` | Log compaction & snapshot install | ✅ PASS |
 
 ---
 
-## Acknowledgements
-
-Lab specifications originate from MIT 6.5840 (previously 6.824) course taught by the PDOS group. Core protocol design reference: [Raft Consensus Algorithm Paper](https://raft.github.io/raft.pdf) and Google MapReduce paperGitHub.
+## Lab 4: Fault-tolerant Key/Value Service
 
 > 
-> **Tech Stack**: Go, Go RPC, concurrency primitives (`sync.Mutex`, `sync.Cond`), plugin system, file atomic operations, race‑detector testing.
+> Status: Not started
+
+Build a replicated fault-tolerant key-value service directly on top of the Raft consensus library from Lab3. The service provides linearizable Put, Append, Get operations, handles client retries, and survives node crashes and network partitions.
+
+---
+
+## Lab 5: Sharded Key/Value Service
+
+> 
+> Status: Not started
+
+Sharded KV system. Data is split into multiple shards, each shard managed by an independent Raft group. A configuration service tracks shard assignment, supports rebalancing shards between Raft groups when the set of servers changes. This lab demonstrates scaling state machine by partitioning data.
+
+---
+
+## Tech Stack
+
+- **Language**: Go
+- **RPC**: Go net/rpc
+- **Concurrency**: `sync.Mutex`, `sync.Cond`, goroutines, channels
+- **Testing**: Go built-in test framework, race detector, network failure injection
+- **File I/O**: Atomic file rename for intermediate outputs (MapReduce)
+
+## Acknowledgements
+
+Lab specifications originate from MIT 6.5840 (previously 6.824) course taught by the PDOS group.
+Core protocol design reference: [Raft Consensus Algorithm Paper](https://raft.github.io/raft.pdf) and Google MapReduce paper.
+Lab guide: [https://pdos.csail.mit.edu/6.824/labs/lab-raft1.html](https://pdos.csail.mit.edu/6.824/labs/lab-raft1.html)
