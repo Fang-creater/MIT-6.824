@@ -91,10 +91,92 @@ make mr
 
 ## Lab 2: Single‑node Linearizable Key‑Value Server
 
-> 
-> Status: Not started
+Single‑node key‑value RPC service implementing **conditional Put with version numbers**, client retry logic, and a distributed lock built atop the KV service. This lab establishes RPC, linearizability, conditional modification semantics that are reused in Lab3 replicated KV service.
 
-A simple linearizable key/value server without consensus. Implements `Put`, `Append`, `Get` operations with client request deduplication to avoid duplicated writes when clients retry requests. This lab builds RPC and state-machine foundations that will be reused in Lab3 replicated KV service.
+> 
+> Status: Fully completed, all official test cases pass under Go race detector.
+
+### System Overview
+
+Lab2 consists of three core components:
+
+1. **KV Server (`server.go`)**: RPC server maintaining key‑value store, each key carries a monotonically increasing `version` number for conditional writes.
+2. **KV Clerk (`client.go`)**: Client library that sends `Get` / `Put` RPCs, implements network‑error retry, handles ambiguous reply loss with `ErrMaybe` error.
+3. **Distributed Lock (`lock.go`)**: A user‑level lock built purely on top of KV clerk’s `Get` and conditional `Put`. Implements `Acquire()` / `Release()` using optimistic concurrency control.
+
+Server provides three error types:
+
+- `OK`: Operation success
+- `ErrNoKey`: Target key does not exist
+- `ErrVersion`: Version mismatch for conditional Put
+Client additionally returns `ErrMaybe`: RPC reply lost; operation may or may not have executed on server.
+
+#### Core Server Logic (`server.go`)
+
+- Data model: `map[string]KvEntry` where `KvEntry { value string, version Tversion }`
+- `Get`: return value + version for given key; return `ErrNoKey` for missing key.
+- `Put` conditional write rules:
+  1. If key **does not exist**: accept write only when client passes `version == 0`, new entry starts at version 1; otherwise return `ErrNoKey`.
+  2. If key **exists**: only apply update when client‑supplied version matches server‑side version; increment version by 1 on success.
+  3. Version mismatch returns `ErrVersion`.
+- All state access guarded by `sync.Mutex` for thread‑safe concurrent RPC handlers.
+
+#### KV Clerk Client Logic (`client.go`)
+
+- `Get`: Retry infinitely on network failure; only return upon receiving valid server reply. `ErrNoKey` is legitimate application‑level error, **not treated as network failure**.
+- `Put`: Distinguish first‑try vs resent RPC:
+  1. First RPC receives `ErrVersion`: definitely rejected → return `ErrVersion`.
+  2. Retransmitted RPC receives `ErrVersion`: reply may be for a previous already‑executed request → return ambiguous `ErrMaybe`.
+  3. On network timeout/lost reply: mark `resent=true` and sleep‑backoff before retry.
+
+#### Distributed Lock Implementation (`lock.go`)
+
+Pure user‑space lock built on conditional KV operations, no special server‑side support.
+
+- Each lock instance generates a unique random `id` to identify lock holder.
+- `Acquire()`:
+  1. Repeatedly `Get()` lock key. If stored value equals lock’s unique id → already hold lock.
+  2. Use conditional `Put` to try writing own unique id, with version read from prior `Get`.
+  3. Handle `ErrMaybe` ambiguity: re‑`Get` to check whether our id is stored to judge if lock is acquired.
+  4. Poll‑sleep when lock is held by other parties.
+- `Release()`: conditional Put to write empty string to release lock; resolve `ErrMaybe` ambiguity by reading back lock state.
+
+### Core Design Highlights
+
+1. **Version‑based conditional writes**: Enable compare‑and‑swap semantics on top of plain RPC, foundational for building lock and later replicated state‑machines.
+2. **Ambiguous RPC semantics (`ErrMaybe`)**: Network can drop responses while request arrives at server; client cannot know whether operation took place, must surface this ambiguity to upper‑layer application (the lock library).
+3. **Lock built entirely at application layer**: No server‑side lock primitive; lock safety is guaranteed purely by conditional‑Put atomicity.
+4. **Concurrency safety**: Server uses coarse‑grained mutex; client handles retransmission and ambiguous outcomes; lock resolves `ErrMaybe` by reading‑back state.
+
+### Key Technical Takeaways
+
+- Network RPC is unreliable: request can arrive, reply can be lost; this creates ambiguous execution state (`ErrMaybe`).
+- Version numbers act as lightweight optimistic concurrency primitive without hardware CAS.
+- Application‑level distributed lock must handle ambiguous errors; cannot blindly retry Put on `ErrMaybe`.
+- Even single‑node RPC service requires careful thread‑safety for concurrent incoming RPC requests.
+
+### Test Results
+![Lab2 Key/Value Server all tests passed](assets/lab2-kvsrv1.png)
+![Lab2 Key/Value Server all tests passed](assets/lab2-lock1.png)
+
+### Reproduce Test Results
+
+```
+cd src/kvsrv
+make kvsrv
+# run all lab2 tests with race detector
+go test -v -race
+```
+
+| Test Case | Purpose | Result |
+| --- | --- | --- |
+| `TestBasic` | Basic Get / Put conditional‑version semantics | ✅ PASS |
+| `TestPutVersion` | Reject Put when client‑supplied version mismatches server | ✅ PASS |
+| `TestPutNoKey` | Put create‑key only with version 0, reject otherwise | ✅ PASS |
+| `TestConcurrentClerk` | Multiple concurrent clerk clients against single server | ✅ PASS |
+| `TestLock` | Correct mutual exclusion for distributed lock | ✅ PASS |
+| `TestLockConcurrent` | Multiple competing lock Acquire / Release | ✅ PASS |
+| `TestLockMaybe` | Lock correctly handles ambiguous ErrMaybe replies | ✅ PASS |
 
 ---
 
