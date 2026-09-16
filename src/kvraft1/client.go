@@ -1,17 +1,20 @@
 package kvraft
 
 import (
+	"sync"
+	"time"
+
 	"6.5840/kvsrv1/rpc"
 	"6.5840/kvtest1"
 	"6.5840/tester1"
 )
 
-
 type Clerk struct {
 	clnt    *tester.Clnt
 	servers []string
-	leader int // last successful leader (index into servers[])
+	leader  int // last successful leader (index into servers[])
 	// You can add to this struct.
+	mu sync.Mutex
 }
 
 func MakeClerk(clnt *tester.Clnt, servers []string) kvtest.IKVClerk {
@@ -21,7 +24,17 @@ func MakeClerk(clnt *tester.Clnt, servers []string) kvtest.IKVClerk {
 }
 
 func (ck *Clerk) Leader() int {
+	ck.mu.Lock()
+	defer ck.mu.Unlock()
 	return ck.leader
+}
+
+func (ck *Clerk) advance(failed int) {
+	ck.mu.Lock()
+	defer ck.mu.Unlock()
+	if ck.leader == failed {
+		ck.leader = (failed + 1) % len(ck.servers)
+	}
 }
 
 // Get fetches the current value and version for a key.  It returns
@@ -37,7 +50,17 @@ func (ck *Clerk) Leader() int {
 func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
 
 	// You will have to modify this function.
-	return "", 0, ""
+	args := rpc.GetArgs{Key: key}
+	for {
+		leader := ck.Leader()
+		reply := rpc.GetReply{}
+		ok := ck.clnt.Call(ck.servers[leader], "KVServer.Get", &args, &reply)
+		if ok && reply.Err != rpc.ErrWrongLeader {
+			return reply.Value, reply.Version, reply.Err
+		}
+		ck.advance(leader)
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 // Put updates key with value only if the version in the
@@ -59,5 +82,20 @@ func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
 // arguments. Additionally, reply must be passed as a pointer.
 func (ck *Clerk) Put(key string, value string, version rpc.Tversion) rpc.Err {
 	// You will have to modify this function.
-	return ""
+	args := rpc.PutArgs{Key: key, Value: value, Version: version}
+	resent := false
+	for {
+		leader := ck.Leader()
+		reply := rpc.PutReply{}
+		ok := ck.clnt.Call(ck.servers[leader], "KVServer.Put", &args, &reply)
+		if ok && reply.Err != rpc.ErrWrongLeader {
+			if reply.Err == rpc.ErrVersion && resent {
+				return rpc.ErrMaybe
+			}
+			return reply.Err
+		}
+		resent = true
+		ck.advance(leader)
+		time.Sleep(10 * time.Millisecond)
+	}
 }
