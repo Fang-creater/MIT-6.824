@@ -332,10 +332,68 @@ All 3A / 3B / 3C / 3D test cases pass under Go race detector.
 
 ## Lab 4: Fault-tolerant Key/Value Service
 
-> 
-> Status: Not started
+Fault‑tolerant replicated key‑value service built upon Lab3 Raft implementation. Implements a generic **Replicated State‑Machine(RSM)** abstraction layer to decouple consensus logic from application business logic. The KV service preserves Lab2 linearizable conditional‑version KV semantics. The system continues processing client requests as long as server majority is alive and reachable, tolerating node crash, network partition, dropped / reordered messages.
 
-Build a replicated fault-tolerant key-value service directly on top of the Raft consensus library from Lab3. The service provides linearizable Put, Append, Get operations, handles client retries, and survives node crashes and network partitions.
+> 
+> Status: Fully completed, **4A / 4B /4C** all official test cases pass with Go race‑detector enabled.
+
+### System Overview
+
+Three core components:
+
+1. **RSM Replicated State‑Machine (`kvraft1/rsm/rsm.go`)**: Generic wrapper layer sitting between Raft library and application service. Defines `StateMachine` interface (`DoOp()`, `Snapshot()`, `Restore()`). Implements `Submit()` API, background `reader()` goroutine, waiter matching logic, snapshot trigger & restore logic.
+2. **KVraft Application Server (`kvraft1/server.go`)**: Implements `StateMachine` interface. Re‑uses Lab2 conditional‑version KV business logic. RPC handlers for `Get` / `Put` invoke `rsm.Submit()`, forcing every operation to go through Raft consensus log for linearizability. Implements `Snapshot()` / `Restore()` for persisting KV state.
+3. **KVraft Clerk Client (`kvraft1/client.go`)**: Multi‑replica aware client. Automatically discover leader by round‑robin server endpoints on `ErrWrongLeader` or network RPC failure; caches last known leader for optimization. Preserves Lab2 Put `resent` / `ErrMaybe` ambiguous‑error semantics; compatible with existing `lock.go` implementation via `IKVClerk` interface.
+
+#### Part 4A: Replicated State‑Machine(RSM)
+
+Responsibilities of `rsm.go`:
+
+- `Op` struct: wrap application request, attach unique per‑server monotonic id and server id, stored inside Raft log entry.
+- `Submit()`: create unique Op object, invoke `rf.Start()`, register waiter in pending map, block waiting for commit result with timeout safety‑net. Return `rpc.ErrWrongLeader` if not leader or lost leadership before operation commit.
+- Background `reader()` goroutine: consumes Raft `applyCh`. Handles two kinds of messages: committed log entries and snapshot (`InstallSnapshot`) messages.
+- Waiter / pending map: keyed by Raft log index, stores waiter struct containing op unique id and result channel. After operation commit, match committed Op against waiter; detect leadership change where different op occupies same log index and return `ErrWrongLeader`.
+- Snapshot support: on server restart load persisted snapshot and call `StateMachine.Restore()`. Clean up stale pending waiters for indices older than snapshot `lastApplied`.
+
+> 
+> 4A test suite validates basic submit‑commit, concurrent submit, leader failure, network partition, restart log replay, shutdown semantics.
+
+#### Part 4B: Replicated Key‑Value Service (no snapshot)
+
+- Server `DoOp()`: dispatches `GetArgs` / `PutArgs` and re‑uses Lab2 conditional‑version logic to modify in‑memory kv store.
+- RPC `Get` / `Put` handlers: pass arguments to `rsm.Submit()`, propagate `ErrWrongLeader` back to clerk client.
+- Clerk logic: iterate over replica servers when encountering `ErrWrongLeader` or RPC network failure; cache last successful leader index to reduce leader‑discovery overhead. Preserve Lab2 Put `resent` flag for ambiguous `ErrMaybe` error.
+- All operations (including read‑only `Get`) go through Raft log to guarantee linearizability (not implementing read‑only optimization from Raft paper section‑8).
+
+> 
+> 4B test suite validates basic consensus, concurrent clients, unreliable network, network partition, node restart & persistence.
+
+#### Part 4C: Service with snapshot / log compaction
+
+- RSM monitors `rf.PersistBytes()` against `maxraftstate` threshold. When persisted Raft state size approaches threshold, invoke `StateMachine.Snapshot()` to acquire application state snapshot blob and call `rf.Snapshot(index, data)`. If `maxraftstate == -1`, snapshot is disabled.
+- On receiving Raft snapshot message from `applyCh`, RSM invokes `StateMachine.Restore()` to replace application state, updates `lastApplied`, cleans stale pending waiters.
+- KV server `Snapshot()`: serialize `map[string]KvEntry` kv‑store using labgob.
+- KV server `Restore()`: deserialize labgob byte‑slice and replace local kv map.
+- All struct fields persisted in snapshot must be capitalized for labgob serialization.
+
+> 
+> 4C test suite validates snapshot creation, InstallSnapshot RPC, crash‑restart recovery, snapshot under unreliable network & partition.
+
+### Core Design Highlights
+
+1. **Generic RSM abstraction**: Decouples application business logic from raw Raft API; same rsm package can drive counter example service and kvraft service without modifying Raft core.
+2. **Op‑id waiter matching**: Pure log‑index matching is insufficient for leadership‑change scenario. Unique `Op{Me,Id}` validates whether committed log entry corresponds to original submit RPC caller.
+3. **Mandatory log‑pass for reads**: `Get` also submits to Raft log to avoid serving stale state; satisfies linearizability requirement as per lab requirement.
+4. **End‑to‑end snapshot stack**: Raft manages log truncation & InstallSnapshot RPC; RSM controls snapshot threshold and invokes application snapshot/restore hooks; application serializes its own state.
+5. **Clerk leader‑caching**: Reduce leader‑discovery overhead; keep `IKVClerk` API compatible so Lab2 distributed lock can run unmodified on top of replicated kvraft service.
+
+### Key Technical Takeaways
+
+- Directly invoking raw `raft.Start()` in application code results in large amount of repetitive boiler‑plate; RSM encapsulates waiter management, applyCh consumption, snapshot recovery logic.
+- Leadership change can overwrite log index with unrelated operation, must validate op identity beyond log index.
+- Snapshot is cross‑layer feature; missing handling at any layer will break crash recovery for lagging / restarted servers.
+- Clerk must transparently handle `ErrWrongLeader`, application‑level code (lock.go) remains unaware of multi‑replica setup.
+- All persisted struct fields must be capitalized otherwise labgob silently fails deserialization.
 
 ---
 
@@ -345,6 +403,29 @@ Build a replicated fault-tolerant key-value service directly on top of the Raft 
 > Status: Not started
 
 Sharded KV system. Data is split into multiple shards, each shard managed by an independent Raft group. A configuration service tracks shard assignment, supports rebalancing shards between Raft groups when the set of servers changes. This lab demonstrates scaling state machine by partitioning data.
+
+## Test Results
+
+### Reproduce Test Results
+
+```
+cd src/kvraft1
+
+# Run Part‑4A RSM tests
+make RUN="-run 4A" rsm1
+cd kvraft1/rsm && go test -v -race -run 4A
+
+# Run Part‑4B KV service tests (no snapshot)
+make RUN="-run 4B" kvraft1
+cd kvraft1 && go test -v -race -run 4B
+
+# Run Part‑4C snapshot tests
+make RUN="-run 4C" kvraft1
+cd kvraft1 && go test -v -race -run 4C
+
+# Run full kvraft suite with race‑detector
+go test -v -race
+```
 
 ---
 
