@@ -1,10 +1,12 @@
 package rsm
 
 import (
+	"bytes"
 	"sync"
 	"time"
 
 	"6.5840/kvsrv1/rpc"
+	"6.5840/labgob"
 	"6.5840/labrpc"
 	"6.5840/raft1"
 	"6.5840/raftapi"
@@ -20,6 +22,11 @@ type Op struct {
 	Me  int // which rsm (peer)
 	Id  int64
 	Req any // the operation
+}
+
+type SnapshotData struct {
+	LastApplied int
+	State       []byte
 }
 
 type opResult struct {
@@ -75,6 +82,7 @@ type RSM struct {
 // MakeRSM() must return quickly, so it should start goroutines for
 // any long-running work.
 func MakeRSM(servers []*labrpc.ClientEnd, me int, persister *tester.Persister, maxraftstate int, sm StateMachine) *RSM {
+	labgob.Register(SnapshotData{})
 	rsm := &RSM{
 		me:           me,
 		maxraftstate: maxraftstate,
@@ -82,11 +90,54 @@ func MakeRSM(servers []*labrpc.ClientEnd, me int, persister *tester.Persister, m
 		sm:           sm,
 		pending:      make(map[int]*waiter),
 	}
+	rsm.restoreSnapshot(persister.ReadSnapshot())
 	if !tester.UseRaftStateMachine {
 		rsm.rf = raft.Make(servers, me, persister, rsm.applyCh)
 		go rsm.reader()
 	}
 	return rsm
+}
+
+func (rsm *RSM) encodeSnapshot(index int) []byte {
+	state := rsm.sm.Snapshot()
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	if e.Encode(SnapshotData{LastApplied: index, State: state}) != nil {
+		return nil
+	}
+	return w.Bytes()
+}
+
+func (rsm *RSM) restoreSnapshot(data []byte) {
+	if data == nil || len(data) < 1 {
+		return
+	}
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var sd SnapshotData
+	if d.Decode(&sd) != nil {
+		return
+	}
+	rsm.sm.Restore(sd.State)
+	if sd.LastApplied > rsm.lastApplied {
+		rsm.lastApplied = sd.LastApplied
+	}
+}
+
+func (rsm *RSM) maybeSnapshot() {
+	rsm.mu.Lock()
+	if rsm.rf == nil || rsm.maxraftstate <= 0 || rsm.lastApplied == 0 {
+		rsm.mu.Unlock()
+		return
+	}
+	if rsm.rf.PersistBytes()*10 < rsm.maxraftstate*9 {
+		rsm.mu.Unlock()
+		return
+	}
+	index := rsm.lastApplied
+	rsm.mu.Unlock()
+
+	rsm.rf.Snapshot(index, rsm.encodeSnapshot(index))
 }
 
 // reader reads committed operations from Raft's applyCh, hands each one
@@ -102,8 +153,18 @@ func (rsm *RSM) reader() {
 			// Raft installed a snapshot: replace the state machine
 			// state and forget anything we had applied before it.
 			rsm.mu.Lock()
-			rsm.sm.Restore(msg.Snapshot)
-			rsm.lastApplied = msg.SnapshotIndex
+			if msg.SnapshotIndex > rsm.lastApplied {
+				rsm.restoreSnapshot(msg.Snapshot)
+			}
+			for idx, w := range rsm.pending {
+				if idx <= rsm.lastApplied {
+					delete(rsm.pending, idx)
+					select {
+					case w.ch <- opResult{err: rpc.ErrWrongLeader}:
+					default:
+					}
+				}
+			}
 			rsm.mu.Unlock()
 			continue
 		}
@@ -130,7 +191,7 @@ func (rsm *RSM) reader() {
 		if w, ok := rsm.pending[msg.CommandIndex]; ok {
 			delete(rsm.pending, msg.CommandIndex)
 			var res opResult
-			if w.id == op.Id {
+			if w.id == op.Id && op.Me == rsm.me {
 				// Our operation committed: hand back its result.
 				res = opResult{val: result, err: rpc.OK}
 			} else {
@@ -144,9 +205,7 @@ func (rsm *RSM) reader() {
 			}
 		}
 		rsm.mu.Unlock()
-
-		// Part C: if rsm.maxraftstate != -1 and the raft state has
-		// grown past it, call rsm.rf.Snapshot(index, rsm.sm.Snapshot()).
+		rsm.maybeSnapshot()
 	}
 
 	// applyCh was closed: we are being killed.  Wake everybody up so

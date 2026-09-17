@@ -1,6 +1,7 @@
 package kvraft
 
 import (
+	"bytes"
 	"sync"
 
 	"6.5840/kvraft1/rsm"
@@ -11,8 +12,8 @@ import (
 )
 
 type KvEntry struct {
-	value   string
-	version rpc.Tversion
+	Value   string
+	Version rpc.Tversion
 }
 
 type KVServer struct {
@@ -52,7 +53,7 @@ func (kv *KVServer) DoGet(args *rpc.GetArgs) rpc.GetReply {
 	if !ok {
 		return rpc.GetReply{Value: "", Version: 0, Err: rpc.ErrNoKey}
 	}
-	return rpc.GetReply{Value: e.value, Version: e.version, Err: rpc.OK}
+	return rpc.GetReply{Value: e.Value, Version: e.Version, Err: rpc.OK}
 }
 
 func (kv *KVServer) DoPut(args *rpc.PutArgs) rpc.PutReply {
@@ -62,27 +63,51 @@ func (kv *KVServer) DoPut(args *rpc.PutArgs) rpc.PutReply {
 	e, ok := kv.kv[args.Key]
 	if !ok {
 		if args.Version == 0 {
-			kv.kv[args.Key] = KvEntry{value: args.Value, version: 1}
+			kv.kv[args.Key] = KvEntry{Value: args.Value, Version: 1}
 			return rpc.PutReply{Err: rpc.OK}
 		}
 		return rpc.PutReply{Err: rpc.ErrNoKey}
 	}
 
-	if args.Version != e.version {
+	if args.Version != e.Version {
 		return rpc.PutReply{Err: rpc.ErrVersion}
 	}
 
-	kv.kv[args.Key] = KvEntry{value: args.Value, version: e.version + 1}
+	kv.kv[args.Key] = KvEntry{Value: args.Value, Version: e.Version + 1}
 	return rpc.PutReply{Err: rpc.OK}
 }
 
 func (kv *KVServer) Snapshot() []byte {
 	// Your code here
-	return nil
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	if e.Encode(kv.kv) != nil {
+		return nil
+	}
+	return w.Bytes()
 }
 
 func (kv *KVServer) Restore(data []byte) {
 	// Your code here
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+
+	if data == nil || len(data) < 1 {
+		return
+	}
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var m map[string]KvEntry
+	if d.Decode(&m) != nil {
+		return
+	}
+	if m == nil {
+		m = make(map[string]KvEntry)
+	}
+	kv.kv = m
 }
 
 func (kv *KVServer) Get(args *rpc.GetArgs, reply *rpc.GetReply) {
@@ -127,6 +152,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, gid tester.Tgid, me int, persist
 	labgob.Register(rsm.Op{})
 	labgob.Register(rpc.PutArgs{})
 	labgob.Register(rpc.GetArgs{})
+	labgob.Register(KvEntry{})
 
 	kv := &KVServer{me: me}
 	kv.kv = make(map[string]KvEntry)
