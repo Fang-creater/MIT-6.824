@@ -395,15 +395,6 @@ Responsibilities of `rsm.go`:
 - Clerk must transparently handle `ErrWrongLeader`, application‑level code (lock.go) remains unaware of multi‑replica setup.
 - All persisted struct fields must be capitalized otherwise labgob silently fails deserialization.
 
----
-
-## Lab 5: Sharded Key/Value Service
-
-> 
-> Status: Not started
-
-Sharded KV system. Data is split into multiple shards, each shard managed by an independent Raft group. A configuration service tracks shard assignment, supports rebalancing shards between Raft groups when the set of servers changes. This lab demonstrates scaling state machine by partitioning data.
-
 ## Test Results
 
 ### Reproduce Test Results
@@ -426,6 +417,15 @@ cd kvraft1 && go test -v -race -run 4C
 # Run full kvraft suite with race‑detector
 go test -v -race
 ```
+
+---
+
+## Lab 5: Sharded Key/Value Service
+
+> 
+> Status: Not started
+
+Sharded KV system. Data is split into multiple shards, each shard managed by an independent Raft group. A configuration service tracks shard assignment, supports rebalancing shards between Raft groups when the set of servers changes. This lab demonstrates scaling state machine by partitioning data.
 
 ---
 
