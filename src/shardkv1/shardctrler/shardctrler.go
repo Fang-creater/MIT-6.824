@@ -15,7 +15,10 @@ import (
 	"6.5840/tester1"
 )
 
-const configKey = "ctrl-config"
+const (
+	configKey        = "ctrl-config"
+	pendingConfigKey = "ctrl-pending-config"
+)
 
 // ShardCtrler for the controller and kv clerk.
 type ShardCtrler struct {
@@ -40,6 +43,16 @@ func MakeShardCtrler(clnt *tester.Clnt) *ShardCtrler {
 // controller. In part A, this method doesn't need to do anything. In
 // B and C, this method implements recovery.
 func (sck *ShardCtrler) InitController() {
+	current := sck.configAt(configKey)
+	pending := sck.configAt(pendingConfigKey)
+	if pending == nil || current == nil || pending.Num <= current.Num {
+		return
+	}
+
+	// A previous controller recorded this configuration but did not finish
+	// moving its shards. Repeating migration RPCs is safe because shard
+	// groups use the configuration number to make them idempotent.
+	sck.completeChange(current, pending)
 }
 
 // Called once by the tester to supply the first configuration.  You
@@ -68,7 +81,6 @@ func (sck *ShardCtrler) InitConfig(cfg *shardcfg.ShardConfig) {
 // changes the configuration it may be superseded by another
 // controller.
 func (sck *ShardCtrler) ChangeConfigTo(new *shardcfg.ShardConfig) {
-	// Your code here.
 	old := sck.Query()
 	if old == nil {
 		// No configuration.
@@ -78,6 +90,14 @@ func (sck *ShardCtrler) ChangeConfigTo(new *shardcfg.ShardConfig) {
 		// Stale request.
 		return
 	}
+	// Persist the intended configuration before moving any shard, so a later
+	// controller can resume the exact same migration after a failure.
+	sck.postPendingConfig(new)
+	sck.completeChange(old, new)
+}
+
+// completeChange moves shards from old to new, then makes new visible to clients.
+func (sck *ShardCtrler) completeChange(old, new *shardcfg.ShardConfig) {
 
 	// A group that is leaving appears only in old.Groups;
 	// A group that is joining appears only in new.Groups.
@@ -116,73 +136,101 @@ func (sck *ShardCtrler) ChangeConfigTo(new *shardcfg.ShardConfig) {
 		// 1. freeze source's shard.
 		var state []byte
 		if src != nil {
-			sck.retry(func() bool {
+			if !sck.retry(func() bool {
 				st, err := src.FreezeShard(s, num)
 				if err == rpc.OK {
 					state = st
 					return true
 				}
 				return false
-			})
+			}) {
+				return
+			}
 		}
 
 		// 2. install destination's shard.
 		if dst != nil {
-			sck.retry(func() bool {
+			if !sck.retry(func() bool {
 				return dst.InstallShard(s, state, num) == rpc.OK
-			})
+			}) {
+				return
+			}
 		}
 
 		// 3. delete the frozen shard.
 		if src != nil {
-			sck.retry(func() bool {
+			if !sck.retry(func() bool {
 				return src.DeleteShard(s, num) == rpc.OK
-			})
+			}) {
+				return
+			}
 		}
 	}
 
-	// 4. clients now can find shards.
+	// Clients can find the new owners only after all shard moves finish.
 	sck.postConfig(new)
 }
 
-// postConfig publishes cfg with optimistic version checking until it succeeds.
+// postPendingConfig records cfg as the migration that must be completed.
+func (sck *ShardCtrler) postPendingConfig(cfg *shardcfg.ShardConfig) {
+	v := cfg.String()
+	for {
+		_, ver, err := sck.Get(pendingConfigKey)
+		if err == rpc.ErrNoKey {
+			if sck.Put(pendingConfigKey, v, 0) == rpc.OK {
+				return
+			}
+		} else if err == rpc.OK {
+			if sck.Put(pendingConfigKey, v, ver) == rpc.OK {
+				return
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+// postConfig publishes cfg only when it is newer than the visible configuration.
 func (sck *ShardCtrler) postConfig(cfg *shardcfg.ShardConfig) {
 	v := cfg.String()
 	for {
-		_, ver, err := sck.Get(configKey)
+		current, ver, err := sck.Get(configKey)
 		if err == rpc.ErrNoKey {
 			if sck.Put(configKey, v, 0) == rpc.OK {
 				return
 			}
 		} else if err == rpc.OK {
+			if shardcfg.FromString(current).Num >= cfg.Num {
+				return
+			}
 			if sck.Put(configKey, v, ver) == rpc.OK {
 				return
 			}
-			// ErrVersion: someone else updated (re-read and retry).
-			// Use new controller's version
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
 }
 
-// Return the current configuration
-func (sck *ShardCtrler) Query() *shardcfg.ShardConfig {
-	// Your code here.
-	v, _, err := sck.Get(configKey)
+// configAt reads and decodes the configuration stored at key.
+func (sck *ShardCtrler) configAt(key string) *shardcfg.ShardConfig {
+	v, _, err := sck.Get(key)
 	if err != rpc.OK {
-		// ErrNoKey: the controller has no configuration yet.
 		return nil
 	}
 	return shardcfg.FromString(v)
 }
 
-// retry invokes f until it succeeds or the retry limit is reached.
-func (sck *ShardCtrler) retry(f func() bool) {
+// Return the current configuration
+func (sck *ShardCtrler) Query() *shardcfg.ShardConfig {
+	return sck.configAt(configKey)
+}
+
+// retry invokes f until it succeeds and reports whether it did so in time.
+func (sck *ShardCtrler) retry(f func() bool) bool {
 	for i := 0; i < 100; i++ {
 		if f() {
-			return
+			return true
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	return
+	return false
 }
