@@ -18,27 +18,32 @@ type Clerk struct {
 	mu sync.Mutex // guards leader
 }
 
+// MakeClerk creates a clerk that communicates with replicas in servers.
 func MakeClerk(clnt *tester.Clnt, servers []string) *Clerk {
 	ck := &Clerk{Clnt: clnt, servers: servers}
 	return ck
 }
 
+// Leader returns the index of the most recently successful replica.
 func (ck *Clerk) Leader() int {
 	ck.mu.Lock()
 	defer ck.mu.Unlock()
 	return ck.leader
 }
 
+// setLeader records i as the most recently successful replica.
 func (ck *Clerk) setLeader(i int) {
 	ck.mu.Lock()
 	ck.leader = i
 	ck.mu.Unlock()
 }
 
+// len returns the number of replicas in this group.
 func (ck *Clerk) len() int {
 	return len(ck.servers)
 }
 
+// srv returns the replica address at i, wrapping around the server list.
 func (ck *Clerk) srv(i int) string {
 	return ck.servers[i%len(ck.servers)]
 }
@@ -84,6 +89,7 @@ func (ck *Clerk) PutOnce(key string, value string, version rpc.Tversion) rpc.Err
 	return rpc.ErrWrongLeader
 }
 
+// Get keeps trying replicas until it receives a response from a leader.
 func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
 	// Your code here
 	args := rpc.GetArgs{Key: key}
@@ -106,6 +112,7 @@ func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
 	}
 }
 
+// Put retries a conditional write and returns ErrMaybe after an uncertain retry.
 func (ck *Clerk) Put(key string, value string, version rpc.Tversion) rpc.Err {
 	// Your code here
 	args := rpc.PutArgs{Key: key, Value: value, Version: version}
@@ -139,6 +146,7 @@ func (ck *Clerk) Put(key string, value string, version rpc.Tversion) rpc.Err {
 	}
 }
 
+// FreezeShard freezes shard s for configuration num and returns its state.
 func (ck *Clerk) FreezeShard(s shardcfg.Tshid, num shardcfg.Tnum) ([]byte, rpc.Err) {
 	// Your code here
 	args := shardrpc.FreezeShardArgs{Shard: s, Num: num}
@@ -161,6 +169,7 @@ func (ck *Clerk) FreezeShard(s shardcfg.Tshid, num shardcfg.Tnum) ([]byte, rpc.E
 	}
 }
 
+// InstallShard installs state as shard s for configuration num.
 func (ck *Clerk) InstallShard(s shardcfg.Tshid, state []byte, num shardcfg.Tnum) rpc.Err {
 	// Your code here
 	args := shardrpc.InstallShardArgs{Shard: s, State: state, Num: num}
@@ -183,6 +192,7 @@ func (ck *Clerk) InstallShard(s shardcfg.Tshid, state []byte, num shardcfg.Tnum)
 	}
 }
 
+// DeleteShard removes shard s after configuration num has moved it away.
 func (ck *Clerk) DeleteShard(s shardcfg.Tshid, num shardcfg.Tnum) rpc.Err {
 	// Your code here
 	args := shardrpc.DeleteShardArgs{Shard: s, Num: num}

@@ -41,6 +41,7 @@ func MakeClerk(clnt *tester.Clnt, sck *shardctrler.ShardCtrler) kvtest.IKVClerk 
 	return ck
 }
 
+// GetClerk returns the cached clerk for gid, if one has been created.
 func (ck *Clerk) GetClerk(gid tester.Tgid) (*shardgrp.Clerk, bool) {
 	ck.mu.Lock()
 	defer ck.mu.Unlock()
@@ -48,6 +49,7 @@ func (ck *Clerk) GetClerk(gid tester.Tgid) (*shardgrp.Clerk, bool) {
 	return rck, ok
 }
 
+// clerkFor returns the cached group clerk or creates one from servers.
 func (ck *Clerk) clerkFor(gid tester.Tgid, servers []string) *shardgrp.Clerk {
 	ck.mu.Lock()
 	defer ck.mu.Unlock()
@@ -59,6 +61,7 @@ func (ck *Clerk) clerkFor(gid tester.Tgid, servers []string) *shardgrp.Clerk {
 	return c
 }
 
+// groupFor resolves key's current shard group and returns its clerk.
 func (ck *Clerk) groupFor(key string) (tester.Tgid, *shardgrp.Clerk, bool) {
 	cfg := ck.sck.Query()
 	if cfg == nil {
@@ -110,7 +113,7 @@ func (ck *Clerk) Put(key string, value string, version rpc.Tversion) rpc.Err {
 			continue
 		}
 		err := gck.PutOnce(key, value, version)
-		// traverse each copy once, no waiting  indefinitely
+		// traverse each copy once, no waiting indefinitely
 		if err == rpc.ErrWrongGroup || err == rpc.ErrWrongLeader {
 			// shard moved: re-read and retry
 			sent = true

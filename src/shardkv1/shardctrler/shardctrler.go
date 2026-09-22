@@ -145,6 +145,7 @@ func (sck *ShardCtrler) ChangeConfigTo(new *shardcfg.ShardConfig) {
 	sck.postConfig(new)
 }
 
+// postConfig publishes cfg with optimistic version checking until it succeeds.
 func (sck *ShardCtrler) postConfig(cfg *shardcfg.ShardConfig) {
 	v := cfg.String()
 	for {
@@ -175,6 +176,7 @@ func (sck *ShardCtrler) Query() *shardcfg.ShardConfig {
 	return shardcfg.FromString(v)
 }
 
+// retry invokes f until it succeeds or the retry limit is reached.
 func (sck *ShardCtrler) retry(f func() bool) {
 	for i := 0; i < 100; i++ {
 		if f() {

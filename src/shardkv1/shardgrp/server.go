@@ -44,6 +44,7 @@ type KVServer struct {
 	shards [shardcfg.NShards]shardRec
 }
 
+// initShards initializes shard records and gives the first group initial ownership.
 func (kv *KVServer) initShards() {
 	for s := range kv.shards {
 		kv.shards[s].Data = make(map[string]kvEntry)
@@ -57,6 +58,7 @@ func (kv *KVServer) initShards() {
 	}
 }
 
+// DoOp applies a Raft-committed request to the corresponding shard operation.
 func (kv *KVServer) DoOp(req any) any {
 	// Your code here
 	switch r := req.(type) {
@@ -94,6 +96,7 @@ func (kv *KVServer) DoOp(req any) any {
 	return nil
 }
 
+// doGet reads a key after verifying that this group owns its shard.
 func (kv *KVServer) doGet(a rpc.GetArgs) any {
 	rep := rpc.GetReply{}
 	s := shardcfg.Key2Shard(a.Key)
@@ -116,6 +119,7 @@ func (kv *KVServer) doGet(a rpc.GetArgs) any {
 	return rep
 }
 
+// doPut conditionally updates a key when this group serves its shard.
 func (kv *KVServer) doPut(a rpc.PutArgs) any {
 	rep := rpc.PutReply{}
 	s := shardcfg.Key2Shard(a.Key)
@@ -148,6 +152,7 @@ func (kv *KVServer) doPut(a rpc.PutArgs) any {
 	return rep
 }
 
+// doFreeze stops writes to a shard and returns its encoded state for migration.
 func (kv *KVServer) doFreeze(a shardrpc.FreezeShardArgs) any {
 	rep := shardrpc.FreezeShardReply{Num: a.Num}
 	s := a.Shard
@@ -156,8 +161,7 @@ func (kv *KVServer) doFreeze(a shardrpc.FreezeShardArgs) any {
 	defer kv.mu.Unlock()
 
 	if a.Num < kv.shards[s].Num {
-		// Stale request: do not expose a later incarnation of this shard
-		// as the state for an older configuration change.
+		// Stale request
 		rep.Err = rpc.OK
 		return rep
 	}
@@ -173,13 +177,14 @@ func (kv *KVServer) doFreeze(a shardrpc.FreezeShardArgs) any {
 		// duplicate freeze: hand back the same data
 		rep.State = encodeShard(kv.shards[s].Data)
 	default:
-		// we don't have the shard (e.g. it was already deleted)
+		// shard not exist
 		rep.State = nil
 	}
 	rep.Err = rpc.OK
 	return rep
 }
 
+// doInstall installs a migrated shard unless this server already has newer data.
 func (kv *KVServer) doInstall(a shardrpc.InstallShardArgs) any {
 	rep := shardrpc.InstallShardReply{}
 	s := a.Shard
@@ -188,8 +193,7 @@ func (kv *KVServer) doInstall(a shardrpc.InstallShardArgs) any {
 	defer kv.mu.Unlock()
 
 	if a.Num <= kv.shards[s].Num {
-		// Already installed (or newer): never clobber good data with
-		// an older/duplicate copy.
+		// Already installed or newer
 		rep.Err = rpc.OK
 		return rep
 	}
@@ -200,6 +204,7 @@ func (kv *KVServer) doInstall(a shardrpc.InstallShardArgs) any {
 	return rep
 }
 
+// doDelete drops a migrated shard unless the request is stale.
 func (kv *KVServer) doDelete(a shardrpc.DeleteShardArgs) any {
 	rep := shardrpc.DeleteShardReply{}
 	s := a.Shard
@@ -208,7 +213,7 @@ func (kv *KVServer) doDelete(a shardrpc.DeleteShardArgs) any {
 	defer kv.mu.Unlock()
 
 	if a.Num < kv.shards[s].Num {
-		// Stale: this shard already moved on under a newer config.
+		// stale op, shard has been moved
 		rep.Err = rpc.OK
 		return rep
 	}
@@ -221,6 +226,7 @@ func (kv *KVServer) doDelete(a shardrpc.DeleteShardArgs) any {
 	return rep
 }
 
+// Snapshot serializes all shard records for Raft snapshotting.
 func (kv *KVServer) Snapshot() []byte {
 	// Your code here
 	kv.mu.Lock()
@@ -232,6 +238,7 @@ func (kv *KVServer) Snapshot() []byte {
 	return w.Bytes()
 }
 
+// Restore replaces shard records with those decoded from a Raft snapshot.
 func (kv *KVServer) Restore(data []byte) {
 	// Your code here
 	kv.mu.Lock()
@@ -254,11 +261,10 @@ func (kv *KVServer) Restore(data []byte) {
 	}
 }
 
+// Get submits a read through Raft so ownership is checked in log order.
 func (kv *KVServer) Get(args *rpc.GetArgs, reply *rpc.GetReply) {
 	// Your code here
-	// Always submit through Raft.  In particular, after a restart a
-	// newly-elected leader may need this operation to commit and replay an
-	// earlier InstallShard before it can know that it owns this shard.
+	// Submit through Raft.
 	err, res := kv.rsm.Submit(*args)
 	if err != rpc.OK {
 		reply.Err = err // ErrWrongLeader: clerk should try another server
@@ -275,6 +281,7 @@ func (kv *KVServer) Get(args *rpc.GetArgs, reply *rpc.GetReply) {
 	reply.Err = rpc.ErrWrongGroup
 }
 
+// Put submits a conditional write through Raft and returns its applied result.
 func (kv *KVServer) Put(args *rpc.PutArgs, reply *rpc.PutReply) {
 	// Your code here
 	// See Get: the ownership check must execute in log order, not before
@@ -383,6 +390,7 @@ func NewServer(tc *tester.TesterClnt, ends []*labrpc.ClientEnd, grp tester.Tgid,
 	return StartServerShardGrp(ends, grp, srv, persister, tester.MaxRaftState)
 }
 
+// encodeShard serializes one shard's key/value records for transfer.
 func encodeShard(m map[string]kvEntry) []byte {
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
@@ -392,6 +400,7 @@ func encodeShard(m map[string]kvEntry) []byte {
 	return w.Bytes()
 }
 
+// decodeShard deserializes transferred shard records into a usable map.
 func decodeShard(b []byte) map[string]kvEntry {
 	m := make(map[string]kvEntry)
 	if len(b) == 0 {
