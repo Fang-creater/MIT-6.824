@@ -9,6 +9,10 @@ package shardkv
 //
 
 import (
+	"sync"
+	"time"
+
+	"6.5840/shardkv1/shardcfg"
 	"6.5840/shardkv1/shardgrp"
 
 	"6.5840/kvsrv1/rpc"
@@ -20,8 +24,9 @@ import (
 type Clerk struct {
 	clnt *tester.Clnt
 	sck  *shardctrler.ShardCtrler
-	rcks   map[tester.Tgid]*shardgrp.Clerk
+	rcks map[tester.Tgid]*shardgrp.Clerk
 	// You will have to modify this struct.
+	mu sync.Mutex
 }
 
 // The tester calls MakeClerk and passes in a shardctrler so that
@@ -37,10 +42,35 @@ func MakeClerk(clnt *tester.Clnt, sck *shardctrler.ShardCtrler) kvtest.IKVClerk 
 }
 
 func (ck *Clerk) GetClerk(gid tester.Tgid) (*shardgrp.Clerk, bool) {
+	ck.mu.Lock()
+	defer ck.mu.Unlock()
 	rck, ok := ck.rcks[gid]
 	return rck, ok
 }
 
+func (ck *Clerk) clerkFor(gid tester.Tgid, servers []string) *shardgrp.Clerk {
+	ck.mu.Lock()
+	defer ck.mu.Unlock()
+	if c, ok := ck.rcks[gid]; ok && c != nil {
+		return c
+	}
+	c := shardgrp.MakeClerk(ck.clnt, servers)
+	ck.rcks[gid] = c
+	return c
+}
+
+func (ck *Clerk) groupFor(key string) (tester.Tgid, *shardgrp.Clerk, bool) {
+	cfg := ck.sck.Query()
+	if cfg == nil {
+		return 0, nil, false
+	}
+	sh := shardcfg.Key2Shard(key)
+	gid, srvs, ok := cfg.GidServers(sh)
+	if !ok || gid == 0 || len(srvs) == 0 {
+		return 0, nil, false
+	}
+	return gid, ck.clerkFor(gid, srvs), true
+}
 
 // Get a key from a shardgrp.  You can use shardcfg.Key2Shard(key) to
 // find the shard responsible for the key and ck.sck.Query() to read
@@ -49,11 +79,48 @@ func (ck *Clerk) GetClerk(gid tester.Tgid) (*shardgrp.Clerk, bool) {
 // calling shardgrp.MakeClerk(ck.clnt, servers).
 func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
 	// You will have to modify this function.
-	return "", 0, ""
+	for {
+		_, gck, ok := ck.groupFor(key)
+		if !ok {
+			// no configuration
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
+		v, ver, err := gck.GetOnce(key)
+		// traverse each copy once, no waiting  indefinitely
+		if err == rpc.ErrWrongGroup || err == rpc.ErrWrongLeader {
+			// the configuration moved on: re-read it and retry
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
+		return v, ver, err
+	}
 }
 
 // Put a key to a shard group.
 func (ck *Clerk) Put(key string, value string, version rpc.Tversion) rpc.Err {
 	// You will have to modify this function.
-	return ""
+	sent := false
+
+	for {
+		_, gck, ok := ck.groupFor(key)
+		if !ok {
+			// no configuration
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
+		err := gck.PutOnce(key, value, version)
+		// traverse each copy once, no waiting  indefinitely
+		if err == rpc.ErrWrongGroup || err == rpc.ErrWrongLeader {
+			// shard moved: re-read and retry
+			sent = true
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
+		if err == rpc.ErrVersion && sent {
+			// Put may have been executed
+			return rpc.ErrMaybe
+		}
+		return err
+	}
 }
