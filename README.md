@@ -1,444 +1,312 @@
-# MIT 6.5840 (Formerly 6.824) Distributed Systems Labs
+# MIT 6.5840 Distributed Systems Labs
 
-> 
-> Go‑language implementations for MIT graduate‑level distributed systems course 6.5840, covering MapReduce, single-node KV server, Raft consensus, fault‑tolerant replicated key‑value service and sharded key-value store. This repository demonstrates hands‑on engineering of fault‑tolerant, concurrent distributed protocols, with rigorous unit testing under race‑detection and network‑failure injection.
+This repository contains my Go implementations for the MIT 6.5840 (formerly 6.824) Distributed Systems laboratory sequence. It develops a progression of fault-tolerant systems: a MapReduce framework, a linearizable key/value service, the Raft consensus protocol, a reusable replicated-state-machine abstraction, and a dynamically reconfigurable sharded key/value store.
 
-## Table of Contents
+The project was developed against the course-provided test framework, which injects server crashes, restarts, network partitions, dropped and reordered RPCs, and concurrency stress. The completed components are exercised with Go's race detector. More importantly, the repository is intended to document the design reasoning behind the implementations: how safety properties are preserved while the systems continue to make progress in the presence of failures.
 
-- [Overview](#overview)
-- [Lab Completion Summary](#lab-completion-summary)
+**Technical focus:** Go | RPC systems | concurrency | consensus | persistence | fault tolerance | distributed reconfiguration
+
+## Contents
+
+- [Completion summary](#completion-summary)
+- [Repository structure](#repository-structure)
+- [Engineering scope](#engineering-scope)
 - [Lab 1: MapReduce](#lab-1-mapreduce)
-- [Lab 2: Single-node Linearizable Key/Value Server](#lab-2-single-node-linearizable-keyvalue-server)
-- [Lab 3: Raft Consensus & Fault-Tolerant Replicated KV Service](#lab-3-raft-consensus--fault-tolerant-replicated-kv-service)
-- [Lab 4: Fault-tolerant Key/Value Service](#lab-4-fault-tolerant-keyvalue-service)
-- [Lab 5: Sharded Key/Value Service](#lab-5-sharded-keyvalue-service)
-- [Tech Stack](#tech-stack)
-- [Acknowledgements](#acknowledgements)
+- [Lab 2: Versioned key/value service](#lab-2-versioned-keyvalue-service)
+- [Lab 3: Raft consensus](#lab-3-raft-consensus)
+- [Lab 4: Replicated key/value service](#lab-4-replicated-keyvalue-service)
+- [Lab 5: Sharded key/value service](#lab-5-sharded-keyvalue-service)
+- [Build and test](#build-and-test)
+- [References](#references)
 
-## Overview
+## Completion summary
 
-This repo contains my full implementations for MIT 6.5840 (old 6.824) distributed systems labs.
-The labs progressively build distributed primitives: from a simple distributed MapReduce framework, single-node KV server, Raft consensus protocol, replicated KV service, and finally a sharded, reconfigurable key-value store.
-All completed labs pass the official test suite with Go race detector enabled.
-
-## Lab Completion Summary
-
-| Lab | Topic | Completion Status |
+| Lab | Subject | Status |
 | --- | --- | --- |
-| **Lab 1** | Map‑Reduce Distributed Data‑Processing Framework | Completed — all official tests passed |
-| **Lab 2** | Single‑node Linearizable Key‑Value Server | Not started |
-| **Lab 3** | Raft Consensus & Fault‑Tolerant Replicated KV Service | Fully complete: 3A / 3B / 3C / 3D all tests passing |
-| **Lab 4** | Fault-tolerant Key/Value Service | Not started |
-| **Lab 5** | Sharded Key/Value Service | Not started |
+| 1 | Fault-tolerant MapReduce | Complete |
+| 2 | Single-node linearizable key/value service and lock | Complete |
+| 3 | Raft: election, replication, persistence, and snapshots | Complete (3A-3D) |
+| 4 | Generic replicated state machine and replicated key/value service | Complete (4A-4C) |
+| 5 | Reconfigurable sharded key/value service | Complete (5A-5C) |
 
----
+## Repository structure
 
-## Lab 1: MapReduce
-
-A fault‑tolerant distributed MapReduce implementation following the original Google MapReduce paper. The system supports parallel task scheduling, worker crash recovery, atomic intermediate‑file handling, and correct execution semantics under delayed or duplicate worker replies.
-
-### System Overview
-
-Architecture split into a central **Coordinator** and stateless distributed **Workers**:
-
-- **Coordinator**: manages task lifecycle, finite state machine (Map → Reduce → Completed), timeout monitoring, and fault‑driven task reassignment.
-- **Workers**: pull tasks via RPC, dynamically load map/reduce logic as Go plugins, execute computation, and persist intermediate and final output files.
-
-All official test cases pass: `TestWc`, `TestIndexer`, `TestMapParallel`, `TestReduceParallel`, `TestJobCount`, `TestEarlyExit`, `TestCrashWorker`.
-
-### Core Design Highlights
-
-1. **Pull‑based task scheduling & phase barrier**
-Coordinator enforces strict ordering: all Map tasks must finish before starting Reduce‑phase execution. A background goroutine detects unresponsive workers (10‑second timeout) and re‑assigns hung tasks to guarantee forward progress. Workers poll for new tasks and apply back‑off when no work items remain.
-2. **Per‑task versioning for exactly‑once semantics (key innovation)**
-Slow or zombie workers may submit stale results after a task has been re‑assigned and finished, which corrupt output. I introduced lightweight per‑task version numbers:
-
-- Coordinator increments task version every time it allocates or re‑assigns a task.
-- Worker embeds this version inside its task‑completion RPC request.
-- Coordinator marks task as completed **only when received version matches current task version**.
-This rejects stale replies without heavyweight distributed locks or consensus.
-
-3. **Atomic file I/O semantics**
-Intermediate outputs are written to temporary files and atomically renamed via Unix `rename()`. Reduce workers never observe partial/corrupted intermediate files, removing the requirement for data‑path locks or checksums.
-4. **Idempotency assumption**
-Map / Reduce user functions are assumed idempotent, safe for repeated re‑execution triggered by worker crash or timeout. Combined with version validation and atomic writes, the system maintains consistency across duplicate task invocations.
-
-### Key Technical Takeaways
-
-The main challenge was correctness under network delay and process failure; simple retry logic leads to silent data corruption. Task versioning offers a low‑overhead solution for suppressing stale worker responses. Data‑intensive distributed workload performance is often bounded by filesystem I/O rather than CPU computation.
-
-### Test Results
-![Lab1 MapReduce all tests passed](assets/lab1-mapreduce-test.png)
-
-### Reproduce Test Results
-
+```text
+src/
+├── mr/                         # MapReduce coordinator, workers, and tests
+├── mrapps/                     # MapReduce application plug-ins
+├── kvsrv1/                     # Versioned single-node KV server and lock
+│   ├── lock/
+│   └── rpc/
+├── raft1/                      # Raft implementation and tests
+├── raftapi/                    # Raft interface exposed to services
+├── kvraft1/                    # Raft-backed KV service
+│   └── rsm/                    # Generic replicated state-machine layer
+├── shardkv1/                   # Sharded KV client and service
+│   ├── shardcfg/               # Shard configuration representation
+│   ├── shardctrler/            # Durable reconfiguration controller
+│   └── shardgrp/               # Raft-replicated shard-group server
+├── labrpc/                     # Course RPC and failure-injection framework
+├── labgob/                     # Course serialization wrapper
+├── tester1/                    # Course test infrastructure
+└── main/                       # Executable entry points
 ```
-cd src/mr
+
+Course-provided framework and test-harness packages are retained to preserve the expected execution environment. The principal hand-written implementations are located in `mr`, `kvsrv1`, `raft1`, `kvraft1`, and `shardkv1`.
+
+## Engineering scope
+
+The course supplies the RPC simulator, serialization wrapper, test drivers, executable scaffolding, and interface definitions. The implementation work in this repository covers the coordination and storage protocols themselves, including:
+
+- task scheduling, timeout recovery, and output handling in MapReduce;
+- conditional versioned writes, retry semantics, and a client-side distributed lock;
+- Raft elections, replication, conflict backtracking, durable state, snapshots, and recovery;
+- a generic Raft-backed submission and application layer with waiter management; and
+- shard ownership, migration, controller recovery, and concurrent reconfiguration.
+
+The common engineering constraints are intentionally strict. RPC success does not imply exactly-once execution; replies may be lost after a server has applied a request. Nodes may stop and restart with only persisted state available. A network partition may leave two sides active while only one can form a majority. These constraints guide the use of version numbers, operation identities, terms, configuration numbers, and snapshots throughout the repository.
+
+## Lab 1: MapReduce
+
+**Implementation:** [`coordinator.go`](src/mr/coordinator.go) | [`worker.go`](src/mr/worker.go) | [`rpc.go`](src/mr/rpc.go)
+
+The MapReduce subsystem follows a coordinator/worker architecture. Workers pull assignments through RPC, execute application-specific map or reduce functions loaded as Go plug-ins, and persist intermediate or final output files. The coordinator enforces the map-to-reduce phase barrier and reassigns timed-out work.
+
+### Design highlights
+
+- **Task lifecycle management.** Map and reduce tasks are represented as explicit coordinator state; reduce tasks become eligible only after every map task completes.
+- **Failure recovery.** A background timeout check returns stalled work to the schedulable pool, allowing another worker to execute it.
+- **Attempt versioning.** Each dispatch is associated with a task version. Completion reports are accepted only when their version equals the coordinator's current version, preventing late results from superseded workers from changing task state.
+- **Atomic output publication.** Workers write files through temporary paths and rename them atomically, so consumers do not observe partially written data.
+
+The implementation targets the standard word-count, indexing, parallelism, job-count, early-exit, and worker-crash tests.
+
+### Experimental evidence
+
+<p align="center">
+  <img src="assets/lab1-mapreduce-test.png" alt="Lab 1 test output" width="850">
+</p>
+
+**Figure 1.** Output from `make mr`, which invokes the course MapReduce test suite with Go's race detector enabled.
+
+<!-- Optional additional evidence for Lab 1:
+![Lab 1 parallelism or crash-recovery result](assets/lab1-additional-result.png)
+-->
+
+### Correctness considerations
+
+The central risk is a late completion from a worker that was declared unavailable and whose work has already been reassigned. Accepting that completion could incorrectly advance the phase or expose obsolete output. Attempt versioning makes a completion valid only for the currently assigned attempt. Atomic publication further ensures that a reduce worker observes either a complete intermediate file or no file at all.
+
+This design separates **liveness** from **safety**: timeout-based reassignment ensures that a failed worker cannot indefinitely block the job, while attempt validation prevents repeated execution from changing the scheduler's logical result. The data path relies on idempotent user map and reduce functions, as assumed by the laboratory model.
+
+## Lab 2: Versioned Key/Value Service
+
+**Implementation:** [`server.go`](src/kvsrv1/server.go) | [`client.go`](src/kvsrv1/client.go) | [`lock.go`](src/kvsrv1/lock/lock.go)
+
+`kvsrv1` implements a single-node RPC key/value service with conditional writes. Each key has a value and monotonically increasing version number. A write succeeds only when the client supplies the expected version, providing a compare-and-swap-like primitive.
+
+### Semantics
+
+- `Get` returns the value and version of an existing key, or `ErrNoKey`.
+- A new key may be created only with version `0`; its stored version becomes `1`.
+- An update succeeds only if its supplied version matches the stored version; successful updates increment the version.
+- RPC reply loss is represented by `ErrMaybe`: the request may have executed, but its outcome is not known to the client.
+
+The client retries transport failures and distinguishes first transmissions from retransmissions when interpreting version errors. The accompanying `lock` package builds a distributed mutual-exclusion primitive solely from `Get` and conditional `Put`; ambiguous outcomes are resolved by reading back the lock value.
+
+### Experimental evidence
+
+<p align="center">
+  <img src="assets/lab2-kvsrv1.png" alt="Lab 2 KV service test output" width="850">
+</p>
+
+**Figure 2.** Output from the `kvsrv1` test target, exercising versioned `Get` and conditional `Put` semantics under the course test framework.
+
+<p align="center">
+  <img src="assets/lab2-lock1.png" alt="Lab 2 distributed lock test output" width="850">
+</p>
+
+**Figure 3.** Output from the distributed-lock test target, including tests for ambiguous RPC outcomes.
+
+<!-- Optional additional evidence for Lab 2:
+![Lab 2 race-detector result](assets/lab2-race-result.png)
+-->
+
+### Correctness considerations
+
+The service's linearization point is the mutex-protected conditional update. A successful `Put` changes exactly one key version, and every later accepted update must name that new version. This makes stale observations detectable without requiring server-side lock state.
+
+`ErrMaybe` is deliberately not treated as an ordinary retryable error. If a reply was lost, retransmitting the same conditional write can encounter a version mismatch whether the original operation succeeded or another client won the race. The client therefore exposes ambiguity to callers, while the lock resolves it through a read-back check of the holder identifier. This is a small example of a broader distributed-systems principle: a client cannot infer non-execution from the absence of a response.
+
+## Lab 3: Raft Consensus
+
+**Implementation:** [`raft.go`](src/raft1/raft.go) | [`raftapi.go`](src/raftapi/raftapi.go)
+
+`raft1` implements the Raft replicated-log protocol and exposes the interface in `raftapi`. It provides a linearizable command-ordering substrate for the higher-level services.
+
+### Protocol components
+
+- **Leader election (3A).** Followers and candidates use randomized election deadlines; candidates collect votes only from peers whose logs are at least as up to date.
+- **Log replication (3B).** Leaders maintain `nextIndex` and `matchIndex` for every follower. Per-follower replication goroutines send periodic heartbeats and are explicitly triggered by new entries or rejection replies.
+- **Fast conflict recovery.** Rejected `AppendEntries` replies carry conflict-term and conflict-index information, allowing leaders to skip entire divergent terms instead of decrementing one index per RPC.
+- **Commit safety.** The leader advances the commit index only for entries from its current term after majority replication, preserving the Raft safety condition across leadership changes.
+- **Persistence (3C).** Term, vote, log, and snapshot metadata are encoded with `labgob` and restored before background activity begins after restart.
+- **Snapshots (3D).** Compacted log prefixes are represented by `lastIncludedIndex` and `lastIncludedTerm`; lagging followers receive state via `InstallSnapshot` when ordinary log replication cannot bridge the gap.
+
+Committed commands are delivered in index order through `applyCh`. RPCs are issued without holding the Raft mutex, and channel sends are performed outside the mutex to avoid blocking protocol progress.
+
+### Experimental evidence
+
+<details>
+<summary>View complete Lab 3 test transcript (3A-3D, with <code>-race</code>)</summary>
+
+<p align="center">
+  <img src="assets/lab3-full.png" alt="Complete Lab 3 test output" width="850">
+</p>
+
+**Figure 4.** Consolidated Raft test output covering leader election, log replication, persistence, and snapshot installation.
+
+</details>
+
+### Safety and liveness invariants
+
+The implementation follows the state partition in Figure 2 of the Raft paper. `currentTerm`, `votedFor`, the log, and snapshot boundary metadata are persisted whenever they change. Volatile commit and application indexes are rebuilt from the recovered log and snapshot boundary. A leader initializes `nextIndex` and `matchIndex` on every successful election and steps down immediately after learning of a higher term.
+
+Several invariants are particularly important:
+
+- **Election safety:** a server records at most one vote per term, and only grants it to a candidate whose log is at least as up to date as its own.
+- **Log matching:** a follower accepts entries only when the preceding index and term match; conflicting suffixes are removed before new entries are appended.
+- **Leader completeness:** direct commitment is limited to a majority-replicated entry from the current term. Earlier-term entries become committed only through the commitment of a later current-term entry.
+- **Ordered application:** the applier advances from `lastApplied + 1` through `commitIndex`, so every state machine sees the same committed command sequence.
+- **Snapshot continuity:** after compaction, the first retained log entry is a boundary entry carrying the snapshot term; global log indices are translated relative to `lastIncludedIndex`.
+
+The replication design also addresses liveness. Independent per-follower replicators avoid one slow or partitioned peer delaying others. Trigger channels coalesce bursts of client requests while periodic heartbeats maintain leadership. Conflict hints cause immediate retries after rejection, avoiding the linear number of round trips associated with decrementing `nextIndex` one entry at a time.
+
+## Lab 4: Replicated Key/Value Service
+
+**Implementation:** [`rsm.go`](src/kvraft1/rsm/rsm.go) | [`server.go`](src/kvraft1/server.go) | [`client.go`](src/kvraft1/client.go)
+
+`kvraft1/rsm` provides a reusable replicated state-machine (RSM) layer over Raft. The RSM accepts an application operation, submits it to Raft, waits for the matching applied command, and invokes application-defined state-machine methods.
+
+### RSM abstraction
+
+The `StateMachine` interface separates replication from service logic through `DoOp`, `Snapshot`, and `Restore` methods. A submitted operation includes a server identifier and per-server sequence number. Waiters are indexed by Raft log index and verify this operation identity when a command is applied; this prevents a replaced log slot after leadership change from being mistaken for the original request.
+
+The RSM also monitors persisted Raft-state size, produces application snapshots when configured, restores snapshots delivered by Raft, and releases obsolete waiters.
+
+### KV service
+
+The application service preserves Lab 2's conditional-version semantics. Every `Get` and `Put` operation is submitted through Raft, including reads, so results are derived from the same committed order at every replica. Clerks retry across replicas on `ErrWrongLeader` or transport failure and cache the most recently successful leader.
+
+### Experimental evidence
+
+<details>
+<summary>View complete Lab 4 test transcript (4B-4C, with <code>-race</code>)</summary>
+
+<p align="center">
+  <img src="assets/lab4.png" alt="Lab 4 replicated key-value service test output" width="850">
+</p>
+
+**Figure 5.** Replicated key/value service test output for Lab 4B and Lab 4C, including persistence, partitions, unreliable networks, and snapshot recovery.
+
+</details>
+
+### Why the RSM layer is separate
+
+Calling `Raft.Start` directly from every application RPC handler would duplicate subtle logic: associating an applied entry with its caller, handling a changed leader, releasing blocked requests on shutdown, and coordinating snapshots. The RSM centralizes these responsibilities and lets an application define only its deterministic state transition and snapshot encoding.
+
+The index alone is insufficient to match a request with an applied entry. During a leadership change, a newly elected leader can overwrite an uncommitted slot with a different operation. For this reason, each submitted `Op` includes `(Me, Id)`, and a waiter succeeds only when the committed operation has the same identity. Otherwise, the caller receives `ErrWrongLeader` and the clerk retries with the current leader.
+
+### Snapshot path
+
+Snapshotting is an end-to-end operation rather than only a Raft optimization. Raft compacts its own log after the RSM has serialized application state at a committed index. On receipt of an `InstallSnapshot` apply message, the RSM restores the application state, advances its application boundary, and rejects waiters that refer to compacted indices. In the key/value server, snapshots encode the complete versioned map using `labgob`, so a restarted replica can reconstruct state without replaying discarded entries.
+
+## Lab 5: Sharded Key/Value Service
+
+**Implementation:** [`client.go`](src/shardkv1/client.go) | [`server.go`](src/shardkv1/shardgrp/server.go) | [`shardctrler.go`](src/shardkv1/shardctrler/shardctrler.go)
+
+`shardkv1` horizontally partitions the key space into a fixed set of shards. Each shard group is an independent Raft-backed state machine; a shard controller stores configurations in the Lab 2 key/value service and coordinates ownership changes.
+
+### Shard lifecycle and reconfiguration
+
+Each shard record stores key/value data, a serving state, and the largest configuration number observed for that shard. Its lifecycle is:
+
+```text
+serving --FreezeShard--> frozen --DeleteShard--> not owned
+not owned --InstallShard--> serving
+```
+
+To move a shard from one group to another, the controller performs the following ordered workflow:
+
+1. Freeze the source shard and obtain its serialized state.
+2. Install that state at the destination shard group.
+3. Delete the frozen source copy.
+4. Publish the new configuration only after every shard move completes.
+
+Frozen shards continue to serve reads but reject writes. Migration RPCs include a configuration number; per-shard fencing rejects obsolete, duplicate, or reordered migration attempts. The controller records both a visible configuration and a pending configuration. On restart, it resumes an unfinished pending change. Competing controllers use conditional writes to claim a pending configuration, ensuring that only one controller advances a given change.
+
+The top-level shard client resolves a key to a shard, queries the controller for the owning group, and refreshes its configuration when it receives `ErrWrongGroup`.
+
+### Experimental evidence
+
+<details>
+<summary>View complete Lab 5 test transcript (5A-5C, with <code>-race</code>)</summary>
+
+<p align="center">
+  <img src="assets/lab5.png" alt="Lab 5 sharded key-value service test output" width="850">
+</p>
+
+**Figure 6.** Sharded key/value service test output covering migration, controller recovery, concurrent controllers, and unreliable-network scenarios.
+
+</details>
+
+### Reconfiguration safety argument
+
+The migration order is selected to prevent two groups from accepting writes for the same shard. Before the controller publishes the new configuration, the old owner has frozen the shard and the new owner has installed its state. Thus, clients using the old configuration are directed to a frozen source that rejects writes, while clients cannot use the new destination until the configuration becomes visible. Configuration-number fencing makes all migration operations idempotent with respect to retries and safe under delayed messages.
+
+The controller itself is not assumed to be permanently available. Persisting a pending configuration provides a durable reconfiguration intent; a subsequent controller instance can finish the transfer before publishing it. Conditional writes to the pending key serialize competing controllers without introducing a separate consensus implementation. Together, these mechanisms distinguish three concerns that are often conflated in sharded systems: data movement, client-visible ownership, and controller leadership.
+
+## Build and test
+
+Run commands from `src`, where the course Makefile builds required binaries and runs tests with Go's race detector.
+
+```bash
+cd src
+
+# Lab 1
 make mr
-```
 
-| Test Case | Purpose | Result |
-| --- | --- | --- |
-| `TestWc` | End‑to‑end word‑count validation vs sequential reference | ✅ PASS |
-| `TestIndexer` | End‑to‑end inverted‑index pipeline | ✅ PASS |
-| `TestMapParallel` | Verify concurrent execution of map tasks | ✅ PASS |
-| `TestReduceParallel` | Verify concurrent execution of reduce tasks | ✅ PASS |
-| `TestJobCount` | Prevent redundant over‑execution of tasks | ✅ PASS |
-| `TestEarlyExit` | Fast termination once all tasks finish | ✅ PASS |
-| `TestCrashWorker` | Recover from worker process crash mid‑task | ✅ PASS |
+# Lab 2
+make kvsrv1
+make lock1
 
----
-
-## Lab 2: Single‑node Linearizable Key‑Value Server
-
-Single‑node key‑value RPC service implementing **conditional Put with version numbers**, client retry logic, and a distributed lock built atop the KV service. This lab establishes RPC, linearizability, conditional modification semantics that are reused in Lab3 replicated KV service.
-
-> 
-> Status: Fully completed, all official test cases pass under Go race detector.
-
-### System Overview
-
-Lab2 consists of three core components:
-
-1. **KV Server (`server.go`)**: RPC server maintaining key‑value store, each key carries a monotonically increasing `version` number for conditional writes.
-2. **KV Clerk (`client.go`)**: Client library that sends `Get` / `Put` RPCs, implements network‑error retry, handles ambiguous reply loss with `ErrMaybe` error.
-3. **Distributed Lock (`lock.go`)**: A user‑level lock built purely on top of KV clerk’s `Get` and conditional `Put`. Implements `Acquire()` / `Release()` using optimistic concurrency control.
-
-Server provides three error types:
-
-- `OK`: Operation success
-- `ErrNoKey`: Target key does not exist
-- `ErrVersion`: Version mismatch for conditional Put
-Client additionally returns `ErrMaybe`: RPC reply lost; operation may or may not have executed on server.
-
-#### Core Server Logic (`server.go`)
-
-- Data model: `map[string]KvEntry` where `KvEntry { value string, version Tversion }`
-- `Get`: return value + version for given key; return `ErrNoKey` for missing key.
-- `Put` conditional write rules:
-  1. If key **does not exist**: accept write only when client passes `version == 0`, new entry starts at version 1; otherwise return `ErrNoKey`.
-  2. If key **exists**: only apply update when client‑supplied version matches server‑side version; increment version by 1 on success.
-  3. Version mismatch returns `ErrVersion`.
-- All state access guarded by `sync.Mutex` for thread‑safe concurrent RPC handlers.
-
-#### KV Clerk Client Logic (`client.go`)
-
-- `Get`: Retry infinitely on network failure; only return upon receiving valid server reply. `ErrNoKey` is legitimate application‑level error, **not treated as network failure**.
-- `Put`: Distinguish first‑try vs resent RPC:
-  1. First RPC receives `ErrVersion`: definitely rejected → return `ErrVersion`.
-  2. Retransmitted RPC receives `ErrVersion`: reply may be for a previous already‑executed request → return ambiguous `ErrMaybe`.
-  3. On network timeout/lost reply: mark `resent=true` and sleep‑backoff before retry.
-
-#### Distributed Lock Implementation (`lock.go`)
-
-Pure user‑space lock built on conditional KV operations, no special server‑side support.
-
-- Each lock instance generates a unique random `id` to identify lock holder.
-- `Acquire()`:
-  1. Repeatedly `Get()` lock key. If stored value equals lock’s unique id → already hold lock.
-  2. Use conditional `Put` to try writing own unique id, with version read from prior `Get`.
-  3. Handle `ErrMaybe` ambiguity: re‑`Get` to check whether our id is stored to judge if lock is acquired.
-  4. Poll‑sleep when lock is held by other parties.
-- `Release()`: conditional Put to write empty string to release lock; resolve `ErrMaybe` ambiguity by reading back lock state.
-
-### Core Design Highlights
-
-1. **Version‑based conditional writes**: Enable compare‑and‑swap semantics on top of plain RPC, foundational for building lock and later replicated state‑machines.
-2. **Ambiguous RPC semantics (`ErrMaybe`)**: Network can drop responses while request arrives at server; client cannot know whether operation took place, must surface this ambiguity to upper‑layer application (the lock library).
-3. **Lock built entirely at application layer**: No server‑side lock primitive; lock safety is guaranteed purely by conditional‑Put atomicity.
-4. **Concurrency safety**: Server uses coarse‑grained mutex; client handles retransmission and ambiguous outcomes; lock resolves `ErrMaybe` by reading‑back state.
-
-### Key Technical Takeaways
-
-- Network RPC is unreliable: request can arrive, reply can be lost; this creates ambiguous execution state (`ErrMaybe`).
-- Version numbers act as lightweight optimistic concurrency primitive without hardware CAS.
-- Application‑level distributed lock must handle ambiguous errors; cannot blindly retry Put on `ErrMaybe`.
-- Even single‑node RPC service requires careful thread‑safety for concurrent incoming RPC requests.
-
-### Test Results
-![Lab2 Key/Value Server all tests passed](assets/lab2-kvsrv1.png)
-![Lab2 Key/Value Server all tests passed](assets/lab2-lock1.png)
-
-### Reproduce Test Results
-
-```
-cd src/kvsrv
-make kvsrv
-# run all lab2 tests with race detector
-go test -v -race
-```
-
-| Test Case | Purpose | Result |
-| --- | --- | --- |
-| `TestBasic` | Basic Get / Put conditional‑version semantics | ✅ PASS |
-| `TestPutVersion` | Reject Put when client‑supplied version mismatches server | ✅ PASS |
-| `TestPutNoKey` | Put create‑key only with version 0, reject otherwise | ✅ PASS |
-| `TestConcurrentClerk` | Multiple concurrent clerk clients against single server | ✅ PASS |
-| `TestLock` | Correct mutual exclusion for distributed lock | ✅ PASS |
-| `TestLockConcurrent` | Multiple competing lock Acquire / Release | ✅ PASS |
-| `TestLockMaybe` | Lock correctly handles ambiguous ErrMaybe replies | ✅ PASS |
-
----
-
-## Lab 3: Raft Consensus & Fault‑Tolerant Replicated KV Service
-
-From‑scratch Go implementation of the **Raft replicated state‑machine consensus protocol** following the extended Raft paper, layered underneath a linearizable replicated key‑value service.
-
-> 
-> Status: 3A (leader election), 3B (log replication), 3C (crash persistence), **3D (snapshot / log compaction)** fully completed and all official tests passing.
-
-### Architecture Layering
-
-1. **Raft Layer (`raft.go`)**: consensus library exposing replicated log abstraction to upper application layer. Handles leader election, log replication to node majority, commit safety rules, and durable persistence for crash recovery.
-2. **KV Application Layer**: translates client `Put` / `Append` / `Get` requests into Raft log entries. Waits for log commit events delivered via `applyCh`, applies commands to local state‑machine, deduplicates duplicate client requests, and provides end‑to‑end exactly‑once semantics even across leader re‑elections and client reconnections.
-
-Raft guarantees identical command execution order across replicas, so service remains available and linearizable as long as a majority of peers stay alive.
-
-#### Core Raft Background Goroutines
-
-| Component | Responsibility |
-| --- | --- |
-| `ticker()` | Election timer; trigger candidate transition upon leader silence |
-| `startElection()` | Increment term, self‑vote, broadcast `RequestVote` RPCs |
-| `replicator(peer)` | Per‑peer long‑lived goroutine: heartbeats & log replication |
-| `applier()` | Deliver committed log entries onto `applyCh` in strict index sequence |
-| `persist()` / `readPersist()` | Serialize and restore durable consensus state |
-
-### Implementation Design
-
-#### 1. State Partition: Persistent vs Volatile
-
-Strictly follow Raft Figure 2 state definitions:
-
-- **Persistent (survive restart)**: `currentTerm`, `votedFor`, `log`.
-- **Volatile**: `commitIndex`, `lastApplied`, peer role state, election timer reset timestamp.
-- **Leader‑only volatile**: `nextIndex[]`, `matchIndex[]` — re‑initialized upon every successful leader transition.
-
-Log uses **1‑indexed layout** with dummy zero‑term entry at index 0, eliminating special‑case logic for empty‑log scenarios.
-
-#### 2. 3A Leader Election
-
-- Each peer runs ticker loop: leaders send periodic heartbeats (100 ms interval); followers / candidates use randomized election timeout `[300 ms, 600 ms)` to minimize split‑vote probability.
-- Election starts only when no valid leader heartbeat arrives within timeout window.
-- `startElection()` bumps term, convert to candidate, persist self‑vote, and parallel‑dispatch `RequestVote`. RPC handlers double‑check term and candidate status both pre‑send and post‑reply to discard responses belonging to stale elections.
-- Voting rules: grant vote only when candidate term ≥ local term; peer has not voted within this term; candidate’s log is at‑least‑as‑up‑to‑date (`(LastLogTerm, LastLogIndex)` comparison). This safety rule ensures already‑committed log entries cannot be overwritten by lagging candidates.
-- Gather majority votes → transition to leader; reset `nextIndex` / `matchIndex` arrays and wake replicator goroutines for immediate log synchronization.
-
-#### 3. 3B Log Replication & Fast‑Backup Optimization
-
-Instead of broadcast‑on‑every‑client‑request plus separate heartbeat timer, each follower is assigned one dedicated `replicator(peer)` goroutine driven by buffered trigger channel:
-
-```
-select {
-case <-rf.triggers[peer]:         // new log entry or AppendEntries rejection
-case <-time.After(HeartbeatInterval): // periodic idle heartbeat
-}
-```
-
-Design benefits:
-
-1. Idle heartbeat rate capped to 10 Hz, respecting test‑suite RPC budget constraints.
-2. Bursty concurrent `Start()` requests are coalesced; avoid RPC thundering‑herd.
-3. Log‑mismatch rejection triggers immediate retry without waiting for next heartbeat interval.
-
-`AppendEntries` RPC handler implements four‑step logic:
-
-1. Reject requests carrying stale term; step‑down to follower upon observing higher remote term.
-2. Log consistency check: reject if `PrevLogIndex` out‑of‑bounds or log term mismatch. Return fast‑backup metadata hints (`XTerm`, `XIndex`, `XLen`) to accelerate follower log catch‑up.
-3. Append log entries; truncate divergent suffix when necessary.
-4. Update peer local `commitIndex` and wake entry‑applying goroutine.
-
-> 
-> **Fast‑backup optimization**: Naive one‑step decrement of `nextIndex` would take O(length‑of‑conflict‑tail) RPC round‑trips and time‑out `TestBackup3B`. Using metadata returned from rejected AppendEntries responses, leader jumps backward over entire conflicting terms in one RPC cycle, reducing complexity to O(number‑of‑conflicting‑terms).
-
-#### 4. Commit Safety & Entry Application Pipeline
-
-`advanceCommitIndex()` computes majority‑replicated index from sorted `matchIndex` snapshot. Critical safety constraint (Raft Figure 8): **only commit entries belonging to current leader’s own term directly**. Entries from older terms can achieve commit status only indirectly, piggy‑backed by committing new‑term log entries. Without this rule, committed log entries risk being lost during leader turnover, which is validated in `TestFigure83C`.
-
-Dedicated `applier()` goroutine delivers committed entries via `applyCh`. **Mutex must be released before channel send** to avoid deadlock when application layer stops consuming `applyCh`.
-
-```
-rf.mu.Unlock()
-rf.applyCh <- msg  // blocking send occurs without mutex held
-rf.mu.Lock()
-```
-
-#### 5. 3C Crash Persistence
-
-Call `persist()` exactly whenever durable consensus state mutates: term increment, vote granted, new log entries appended, client command submitted in `Start()`. `Make()` restores persisted state with `readPersist()` **before launching any background goroutines**, so goroutines never observe partially‑initialized Raft peer state.
-
-#### 6. 3D Snapshot & Log Compaction
-
-Log compaction solves infinite log growth problem by persisting a snapshot of the state machine and discarding old log entries before the snapshot’s `lastIncludedIndex`.
-
-1. Index translation layer: all log access translates global log index to offset inside the in-memory log slice, skipping entries pruned by snapshot.
-2. `Snapshot(index, snapshot []byte)` API: truncate log up through `index`, persist `lastIncludedIndex` / `lastIncludedTerm` together with binary snapshot blob.
-3. `InstallSnapshot` RPC: transfers snapshot to lagging peers whose required log prefix has been compacted away.
-4. `applier()` handles snapshot messages from `applyCh`. The KV state machine loads snapshot data and replaces local state.
-5. On restart: peer loads persisted snapshot first and replays remaining log entries after snapshot point.
-
-#### 7. Application‑Layer Replicated KV Service
-
-1. Client operations are wrapped into log commands and submitted through `Raft.Start()`. Non‑leader nodes reject client requests immediately.
-2. Application thread blocks waiting for target log index on `applyCh`. If term has advanced or log slot got overwritten by new leader, client operation is retried.
-3. Apply state‑machine mutation; deduplicate client retries using composite key `(ClientId, RequestId)` to prevent duplicate execution of `Put` / `Append`.
-4. Even read‑only Get operations go through full Raft commit path to guarantee linearizability.
-
-### Critical Lessons & Pitfalls
-
-- **Concurrency & locking discipline dominate debugging difficulty**. Most painful bugs are not protocol‑logic errors but concurrency bugs: always re‑validate term / role state after re‑acquiring mutex; never perform RPC calls while holding locks. Values read before releasing mutex become stale hints after lock re‑acquisition.
-- Naive slow log back‑off cannot pass timing‑sensitive test cases; fast‑backup optimization essential for performance under divergent‑log scenarios.
-- Figure 8 commit safety rule is not theoretical: it triggers reliably under test‑suite failure injection, silently dropping committed entries if omitted.
-- Heartbeat frequency and replication latency create real design tension; trigger‑channel pattern decouples urgent replication events from idle heartbeat cadence.
-- Persist must be invoked on every durable‑state mutation; infrequent persistence leads to non‑deterministic flaky test failures appearing many terms after original bug.
-- Snapshot index translation is error-prone: off-by-one bugs easily appear when mixing global log index and slice offset after log truncation.
-
-### Test Execution Commands
-
-```
-# Run leader‑election tests (3A)
+# Lab 3
 make RUN="-run 3A" raft1
-# Run log‑replication tests (3B)
 make RUN="-run 3B" raft1
-# Run crash‑persistence tests (3C)
 make RUN="-run 3C" raft1
-# Run snapshot & log compaction tests (3D)
 make RUN="-run 3D" raft1
-# Stress‑test full suite with race detector, repeated for grading‑style validation
-for i in {1..100}; do go test -race 2>&1 | tee -a lab3.log; done
-```
 
-All 3A / 3B / 3C / 3D test cases pass under Go race detector.
-
-### Test Results
-![Lab3 Raft all tests passed](assets/lab3-full.png)
-
-| Test | Validation Scenario | Status |
-| --- | --- | --- |
-| `TestInitialElection3A` | Normal‑case leader election without failures | ✅ PASS |
-| `TestReElection3A` | Re‑election triggered after leader / follower failure | ✅ PASS |
-| `TestManyElections3A` | Stabilize to single leader after repeated elections | ✅ PASS |
-| `TestBasicAgree3B` | Basic log consensus among healthy peers | ✅ PASS |
-| `TestFollowerFailure3B` | Consensus progress despite follower crash / network partition | ✅ PASS |
-| `TestBackup3B` | Fast catch‑up for followers with long conflicting log suffix | ✅ PASS |
-| `TestConcurrentStarts3B` | Concurrent client `Start()` requests acquire distinct log slots | ✅ PASS |
-| `TestPersist1/2/3‑3C` | Correct state recovery across crash‑restart sequences | ✅ PASS |
-| `TestFigure83C` | Safety: already‑committed entries are never lost | ✅ PASS |
-| `TestUnreliableAgree3C` | Maintain consensus over lossy, reordered network | ✅ PASS |
-| `TestFigure8Unreliable3C` | Figure‑8 safety under unreliable network | ✅ PASS |
-| `TestSnapshot3D` | Log compaction & snapshot install | ✅ PASS |
-
----
-
-## Lab 4: Fault-tolerant Key/Value Service
-
-Fault‑tolerant replicated key‑value service built upon Lab3 Raft implementation. Implements a generic **Replicated State‑Machine(RSM)** abstraction layer to decouple consensus logic from application business logic. The KV service preserves Lab2 linearizable conditional‑version KV semantics. The system continues processing client requests as long as server majority is alive and reachable, tolerating node crash, network partition, dropped / reordered messages.
-
-> 
-> Status: Fully completed, **4A / 4B /4C** all official test cases pass with Go race‑detector enabled.
-
-### System Overview
-
-Three core components:
-
-1. **RSM Replicated State‑Machine (`kvraft1/rsm/rsm.go`)**: Generic wrapper layer sitting between Raft library and application service. Defines `StateMachine` interface (`DoOp()`, `Snapshot()`, `Restore()`). Implements `Submit()` API, background `reader()` goroutine, waiter matching logic, snapshot trigger & restore logic.
-2. **KVraft Application Server (`kvraft1/server.go`)**: Implements `StateMachine` interface. Re‑uses Lab2 conditional‑version KV business logic. RPC handlers for `Get` / `Put` invoke `rsm.Submit()`, forcing every operation to go through Raft consensus log for linearizability. Implements `Snapshot()` / `Restore()` for persisting KV state.
-3. **KVraft Clerk Client (`kvraft1/client.go`)**: Multi‑replica aware client. Automatically discover leader by round‑robin server endpoints on `ErrWrongLeader` or network RPC failure; caches last known leader for optimization. Preserves Lab2 Put `resent` / `ErrMaybe` ambiguous‑error semantics; compatible with existing `lock.go` implementation via `IKVClerk` interface.
-
-#### Part 4A: Replicated State‑Machine(RSM)
-
-Responsibilities of `rsm.go`:
-
-- `Op` struct: wrap application request, attach unique per‑server monotonic id and server id, stored inside Raft log entry.
-- `Submit()`: create unique Op object, invoke `rf.Start()`, register waiter in pending map, block waiting for commit result with timeout safety‑net. Return `rpc.ErrWrongLeader` if not leader or lost leadership before operation commit.
-- Background `reader()` goroutine: consumes Raft `applyCh`. Handles two kinds of messages: committed log entries and snapshot (`InstallSnapshot`) messages.
-- Waiter / pending map: keyed by Raft log index, stores waiter struct containing op unique id and result channel. After operation commit, match committed Op against waiter; detect leadership change where different op occupies same log index and return `ErrWrongLeader`.
-- Snapshot support: on server restart load persisted snapshot and call `StateMachine.Restore()`. Clean up stale pending waiters for indices older than snapshot `lastApplied`.
-
-> 
-> 4A test suite validates basic submit‑commit, concurrent submit, leader failure, network partition, restart log replay, shutdown semantics.
-
-#### Part 4B: Replicated Key‑Value Service (no snapshot)
-
-- Server `DoOp()`: dispatches `GetArgs` / `PutArgs` and re‑uses Lab2 conditional‑version logic to modify in‑memory kv store.
-- RPC `Get` / `Put` handlers: pass arguments to `rsm.Submit()`, propagate `ErrWrongLeader` back to clerk client.
-- Clerk logic: iterate over replica servers when encountering `ErrWrongLeader` or RPC network failure; cache last successful leader index to reduce leader‑discovery overhead. Preserve Lab2 Put `resent` flag for ambiguous `ErrMaybe` error.
-- All operations (including read‑only `Get`) go through Raft log to guarantee linearizability (not implementing read‑only optimization from Raft paper section‑8).
-
-> 
-> 4B test suite validates basic consensus, concurrent clients, unreliable network, network partition, node restart & persistence.
-
-#### Part 4C: Service with snapshot / log compaction
-
-- RSM monitors `rf.PersistBytes()` against `maxraftstate` threshold. When persisted Raft state size approaches threshold, invoke `StateMachine.Snapshot()` to acquire application state snapshot blob and call `rf.Snapshot(index, data)`. If `maxraftstate == -1`, snapshot is disabled.
-- On receiving Raft snapshot message from `applyCh`, RSM invokes `StateMachine.Restore()` to replace application state, updates `lastApplied`, cleans stale pending waiters.
-- KV server `Snapshot()`: serialize `map[string]KvEntry` kv‑store using labgob.
-- KV server `Restore()`: deserialize labgob byte‑slice and replace local kv map.
-- All struct fields persisted in snapshot must be capitalized for labgob serialization.
-
-> 
-> 4C test suite validates snapshot creation, InstallSnapshot RPC, crash‑restart recovery, snapshot under unreliable network & partition.
-
-### Core Design Highlights
-
-1. **Generic RSM abstraction**: Decouples application business logic from raw Raft API; same rsm package can drive counter example service and kvraft service without modifying Raft core.
-2. **Op‑id waiter matching**: Pure log‑index matching is insufficient for leadership‑change scenario. Unique `Op{Me,Id}` validates whether committed log entry corresponds to original submit RPC caller.
-3. **Mandatory log‑pass for reads**: `Get` also submits to Raft log to avoid serving stale state; satisfies linearizability requirement as per lab requirement.
-4. **End‑to‑end snapshot stack**: Raft manages log truncation & InstallSnapshot RPC; RSM controls snapshot threshold and invokes application snapshot/restore hooks; application serializes its own state.
-5. **Clerk leader‑caching**: Reduce leader‑discovery overhead; keep `IKVClerk` API compatible so Lab2 distributed lock can run unmodified on top of replicated kvraft service.
-
-### Key Technical Takeaways
-
-- Directly invoking raw `raft.Start()` in application code results in large amount of repetitive boiler‑plate; RSM encapsulates waiter management, applyCh consumption, snapshot recovery logic.
-- Leadership change can overwrite log index with unrelated operation, must validate op identity beyond log index.
-- Snapshot is cross‑layer feature; missing handling at any layer will break crash recovery for lagging / restarted servers.
-- Clerk must transparently handle `ErrWrongLeader`, application‑level code (lock.go) remains unaware of multi‑replica setup.
-- All persisted struct fields must be capitalized otherwise labgob silently fails deserialization.
-
-## Test Results
-
-### Reproduce Test Results
-
-```
-cd src/kvraft1
-
-# Run Part‑4A RSM tests
+# Lab 4
 make RUN="-run 4A" rsm1
-cd kvraft1/rsm && go test -v -race -run 4A
-
-# Run Part‑4B KV service tests (no snapshot)
 make RUN="-run 4B" kvraft1
-cd kvraft1 && go test -v -race -run 4B
-
-# Run Part‑4C snapshot tests
 make RUN="-run 4C" kvraft1
-cd kvraft1 && go test -v -race -run 4C
 
-# Run full kvraft suite with race‑detector
-go test -v -race
+# Lab 5
+make RUN="-run 5A" shardkv
+make RUN="-run 5B" shardkv
+make RUN="-run 5C" shardkv
 ```
 
----
+The test environment is supplied by the course framework. It simulates unavailable servers, partitions, unreliable delivery, reordered messages, crashes, and restarts; individual test targets use `go test -race`.
 
-## Lab 5: Sharded Key/Value Service
+### Evaluation focus
 
-> 
-> Status: Not started
+The test suites evaluate both functional results and protocol behavior under adverse schedules. Representative scenarios include parallel MapReduce tasks and crashed workers; lost replies to conditional writes; repeated Raft elections and divergent logs; Raft crash recovery and snapshot installation; replicated KV service under partitions; and shard movement across controller restarts or competing controllers. Running the targets above invokes the corresponding course tests with race detection enabled.
 
-Sharded KV system. Data is split into multiple shards, each shard managed by an independent Raft group. A configuration service tracks shard assignment, supports rebalancing shards between Raft groups when the set of servers changes. This lab demonstrates scaling state machine by partitioning data.
+For a graduate-systems project, these tests are useful not merely as pass/fail checks: they serve as executable statements of safety and liveness requirements. In particular, persistence and reconfiguration bugs commonly surface only after a later election, restart, or stale RPC delivery, which is why the implementation is organized around explicit durable metadata and monotonic fencing values.
 
----
+## References
 
-## Tech Stack
-
-- **Language**: Go
-- **RPC**: Go net/rpc
-- **Concurrency**: `sync.Mutex`, `sync.Cond`, goroutines, channels
-- **Testing**: Go built-in test framework, race detector, network failure injection
-- **File I/O**: Atomic file rename for intermediate outputs (MapReduce)
-
-## Acknowledgements
-
-Lab specifications originate from MIT 6.5840 (previously 6.824) course taught by the PDOS group.
-Core protocol design reference: [Raft Consensus Algorithm Paper](https://raft.github.io/raft.pdf) and Google MapReduce paper.
-Lab guide: [https://pdos.csail.mit.edu/6.824/labs/lab-raft1.html](https://pdos.csail.mit.edu/6.824/labs/lab-raft1.html)
+1. Diego Ongaro and John Ousterhout. *In Search of an Understandable Consensus Algorithm (Extended Version)*, 2014.
+2. Jeffrey Dean and Sanjay Ghemawat. *MapReduce: Simplified Data Processing on Large Clusters*, 2004.
+3. MIT PDOS, [6.5840 Distributed Systems](https://pdos.csail.mit.edu/6.5840/), laboratory materials and supplied test framework.
