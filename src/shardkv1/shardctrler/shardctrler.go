@@ -48,10 +48,6 @@ func (sck *ShardCtrler) InitController() {
 	if pending == nil || current == nil || pending.Num <= current.Num {
 		return
 	}
-
-	// A previous controller recorded this configuration but did not finish
-	// moving its shards. Repeating migration RPCs is safe because shard
-	// groups use the configuration number to make them idempotent.
 	sck.completeChange(current, pending)
 }
 
@@ -90,15 +86,15 @@ func (sck *ShardCtrler) ChangeConfigTo(new *shardcfg.ShardConfig) {
 		// Stale request.
 		return
 	}
-	// Persist the intended configuration before moving any shard, so a later
-	// controller can resume the exact same migration after a failure.
-	sck.postPendingConfig(new)
+	if !sck.claimPendingConfig(old, new) {
+		time.Sleep(100 * time.Millisecond)
+		return
+	}
 	sck.completeChange(old, new)
 }
 
 // completeChange moves shards from old to new, then makes new visible to clients.
 func (sck *ShardCtrler) completeChange(old, new *shardcfg.ShardConfig) {
-
 	// A group that is leaving appears only in old.Groups;
 	// A group that is joining appears only in new.Groups.
 	// Look in both.
@@ -171,18 +167,25 @@ func (sck *ShardCtrler) completeChange(old, new *shardcfg.ShardConfig) {
 	sck.postConfig(new)
 }
 
-// postPendingConfig records cfg as the migration that must be completed.
-func (sck *ShardCtrler) postPendingConfig(cfg *shardcfg.ShardConfig) {
+// claimPendingConfig records cfg if no controller has already claimed a newer
+// configuration than current. It returns false when another controller won.
+func (sck *ShardCtrler) claimPendingConfig(current, cfg *shardcfg.ShardConfig) bool {
 	v := cfg.String()
 	for {
-		_, ver, err := sck.Get(pendingConfigKey)
+		pending, ver, err := sck.configAtVersion(pendingConfigKey)
 		if err == rpc.ErrNoKey {
 			if sck.Put(pendingConfigKey, v, 0) == rpc.OK {
-				return
+				return true
 			}
 		} else if err == rpc.OK {
+			if pending.Num == cfg.Num && pending.String() == v {
+				return true
+			}
+			if pending.Num > current.Num {
+				return false
+			}
 			if sck.Put(pendingConfigKey, v, ver) == rpc.OK {
-				return
+				return true
 			}
 		}
 		time.Sleep(100 * time.Millisecond)
@@ -212,11 +215,20 @@ func (sck *ShardCtrler) postConfig(cfg *shardcfg.ShardConfig) {
 
 // configAt reads and decodes the configuration stored at key.
 func (sck *ShardCtrler) configAt(key string) *shardcfg.ShardConfig {
-	v, _, err := sck.Get(key)
+	cfg, _, err := sck.configAtVersion(key)
 	if err != rpc.OK {
 		return nil
 	}
-	return shardcfg.FromString(v)
+	return cfg
+}
+
+// configAtVersion reads and decodes a configuration together with its KV version.
+func (sck *ShardCtrler) configAtVersion(key string) (*shardcfg.ShardConfig, rpc.Tversion, rpc.Err) {
+	v, ver, err := sck.Get(key)
+	if err != rpc.OK {
+		return nil, ver, err
+	}
+	return shardcfg.FromString(v), ver, rpc.OK
 }
 
 // Return the current configuration

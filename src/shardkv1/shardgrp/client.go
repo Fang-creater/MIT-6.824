@@ -148,69 +148,48 @@ func (ck *Clerk) Put(key string, value string, version rpc.Tversion) rpc.Err {
 
 // FreezeShard freezes shard s for configuration num and returns its state.
 func (ck *Clerk) FreezeShard(s shardcfg.Tshid, num shardcfg.Tnum) ([]byte, rpc.Err) {
-	// Your code here
 	args := shardrpc.FreezeShardArgs{Shard: s, Num: num}
-	for {
-		start := ck.Leader()
-		for i := 0; i < ck.len(); i++ {
-			idx := (start + i) % ck.len()
-			reply := shardrpc.FreezeShardReply{}
-			ok := ck.Call(ck.srv(idx), "KVServer.FreezeShard", &args, &reply)
-			if !ok {
-				continue
-			}
-			if reply.Err == rpc.ErrWrongLeader {
-				continue
-			}
-			ck.setLeader(idx)
-			return reply.State, reply.Err
+	start := ck.Leader()
+	for i := 0; i < ck.len(); i++ {
+		idx := (start + i) % ck.len()
+		reply := shardrpc.FreezeShardReply{}
+		if !ck.Call(ck.srv(idx), "KVServer.FreezeShard", &args, &reply) || reply.Err == rpc.ErrWrongLeader {
+			continue
 		}
-		time.Sleep(100 * time.Millisecond)
+		ck.setLeader(idx)
+		return reply.State, reply.Err
 	}
+	return nil, rpc.ErrWrongLeader
 }
 
 // InstallShard installs state as shard s for configuration num.
 func (ck *Clerk) InstallShard(s shardcfg.Tshid, state []byte, num shardcfg.Tnum) rpc.Err {
-	// Your code here
 	args := shardrpc.InstallShardArgs{Shard: s, State: state, Num: num}
-	for {
-		start := ck.Leader()
-		for i := 0; i < ck.len(); i++ {
-			idx := (start + i) % ck.len()
-			reply := shardrpc.InstallShardReply{}
-			ok := ck.Call(ck.srv(idx), "KVServer.InstallShard", &args, &reply)
-			if !ok {
-				continue
-			}
-			if reply.Err == rpc.ErrWrongLeader {
-				continue
-			}
-			ck.setLeader(idx)
-			return reply.Err
+	start := ck.Leader()
+	for i := 0; i < ck.len(); i++ {
+		idx := (start + i) % ck.len()
+		reply := shardrpc.InstallShardReply{}
+		if !ck.Call(ck.srv(idx), "KVServer.InstallShard", &args, &reply) || reply.Err == rpc.ErrWrongLeader {
+			continue
 		}
-		time.Sleep(100 * time.Millisecond)
+		ck.setLeader(idx)
+		return reply.Err
 	}
+	return rpc.ErrWrongLeader
 }
 
 // DeleteShard removes shard s after configuration num has moved it away.
 func (ck *Clerk) DeleteShard(s shardcfg.Tshid, num shardcfg.Tnum) rpc.Err {
-	// Your code here
 	args := shardrpc.DeleteShardArgs{Shard: s, Num: num}
-	for {
-		start := ck.Leader()
-		for i := 0; i < ck.len(); i++ {
-			idx := (start + i) % ck.len()
-			reply := shardrpc.DeleteShardReply{}
-			ok := ck.Call(ck.srv(idx), "KVServer.DeleteShard", &args, &reply)
-			if !ok {
-				continue
-			}
-			if reply.Err == rpc.ErrWrongLeader {
-				continue
-			}
-			ck.setLeader(idx)
-			return reply.Err
+	start := ck.Leader()
+	for i := 0; i < ck.len(); i++ {
+		idx := (start + i) % ck.len()
+		reply := shardrpc.DeleteShardReply{}
+		if !ck.Call(ck.srv(idx), "KVServer.DeleteShard", &args, &reply) || reply.Err == rpc.ErrWrongLeader {
+			continue
 		}
-		time.Sleep(100 * time.Millisecond)
+		ck.setLeader(idx)
+		return reply.Err
 	}
+	return rpc.ErrWrongLeader
 }
