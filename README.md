@@ -281,17 +281,20 @@ make kvsrv1
 make lock1
 
 # Lab 3
+make raft1
 make RUN="-run 3A" raft1
 make RUN="-run 3B" raft1
 make RUN="-run 3C" raft1
 make RUN="-run 3D" raft1
 
 # Lab 4
+make kvraft1
 make RUN="-run 4A" rsm1
 make RUN="-run 4B" kvraft1
 make RUN="-run 4C" kvraft1
 
 # Lab 5
+make shardkv
 make RUN="-run 5A" shardkv
 make RUN="-run 5B" shardkv
 make RUN="-run 5C" shardkv
